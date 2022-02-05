@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from transformers.training_args import TrainingArguments
 
-from transformer_vae.reg_loss import REG_LOSSES
+from model.reg_loss import REG_LOSSES
 
 
 @dataclass

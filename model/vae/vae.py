@@ -2,9 +2,9 @@ from typing import Optional
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from transformer_vae.vae_decoder import VaeDecoder
-from transformer_vae.vae_encoder import VaeEncoder
-from transformer_vae.outputs import BaseVaeOutput
+from model.vae_decoder import VaeDecoder
+from model.vae_encoder import VaeEncoder
+from model.outputs import BaseVaeOutput
 
 
 class VAE(nn.Module):

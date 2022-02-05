@@ -1,2 +1,3 @@
-# transformer_vae
-A simple transformer VAE framework build on Huggingface Transformers.
+# Funnel AE
+
+THe Funnel Transformer converted into an Autoencoder.

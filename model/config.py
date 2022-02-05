@@ -1,7 +1,7 @@
 from transformers import EncoderDecoderConfig
 
 
-class TransformerVaeConfig(EncoderDecoderConfig):
+class FunnelAeConfig(EncoderDecoderConfig):
     model_type = "vae"
     is_composition = True
 
