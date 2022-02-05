@@ -1,6 +1,8 @@
 from transformers import EncoderDecoderConfig
 
 
+# TODO mix with FunnelConfig
+
 class FunnelAeConfig(EncoderDecoderConfig):
     model_type = "vae"
     is_composition = True
