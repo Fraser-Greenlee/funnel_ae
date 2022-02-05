@@ -1,0 +1,7 @@
+.vscode
+venv
+*.pyc
+.ipynb_checkpoints
+wandb
+*.lock
+__pycache__
