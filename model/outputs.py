@@ -7,7 +7,7 @@ from transformers.modeling_outputs import Seq2SeqLMOutput
 
 
 @dataclass
-class Seq2SeqLMAeOutput(Seq2SeqLMOutput):
+class AutoEncOutput(Seq2SeqLMOutput):
     latent: torch.FloatTensor = None
     reconstructed_encoding: torch.FloatTensor = None
 

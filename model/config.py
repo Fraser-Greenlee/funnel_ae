@@ -10,8 +10,9 @@ class FunnelAeConfig(FunnelConfig):
     def __init__(
         self,
 
+        upsampling_type='bilinear',
+
         latent_size=32,
-        share_embeddings=True,
 
         ae_encoder_n_layers=1,
         ae_encoder_use_dropout=False,
@@ -25,10 +26,9 @@ class FunnelAeConfig(FunnelConfig):
     ):
         super().__init__(**kwargs)
 
-        self.d_input = self.encoder.d_model
-        self.d_output = self.decoder.d_model
+        self.upsampling_type = upsampling_type
+
         self.latent_size = latent_size
-        self.share_embeddings = share_embeddings
 
         self.ae_encoder_n_layers = ae_encoder_n_layers
         self.ae_encoder_use_dropout = ae_encoder_use_dropout
