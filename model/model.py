@@ -335,7 +335,7 @@ class FunnelAePreTrainedModel(FunnelPreTrainedModel):
                 module.word_embeddings.weight.data[module.padding_idx].zero_()
 
 
-class FunnelAeModel(FunnelAePreTrainedModel):
+class FunnelAeBaseModel(FunnelAePreTrainedModel):
     config_class = FunnelAeConfig
     base_model_prefix = "ae"
 
@@ -464,11 +464,11 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         )
 
 
-class FunnelForAutoencoding(FunnelPreTrainedModel):
+class FunnelAeForAutoencoding(FunnelPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.funnel = FunnelAeModel(config)
+        self.funnel = FunnelAeBaseModel(config)
         # Initialize weights and apply final processing
         self.post_init()
 
