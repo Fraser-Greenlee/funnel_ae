@@ -33,12 +33,16 @@ class FunnelAeDecoder(FunnelEncoder):
     def forward(
         self,
         hidden_states,
-        attention_mask=attention_mask,
-        token_type_ids=token_type_ids,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
+        attention_mask=None,
+        token_type_ids=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+        skip_connection_wieghts=None
     ):
+        if skip_connection_wieghts is None:
+            skip_connection_wieghts = torch.zeros(len(self.blocks))
+
         # The pooling is not implemented on long tensors, so we convert this mask.
         attention_mask = attention_mask.type_as(hidden_states)
         attention_inputs = self.attention_structure.init_attention_inputs(
@@ -55,6 +59,7 @@ class FunnelAeDecoder(FunnelEncoder):
             upsample_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             upsample_flag = upsample_flag and block_index > 0
             # TODO can I pre_attention_upsample?
+            # TODO use skip_connection_wieghts[block_index]
             breakpoint()
             if upsample_flag:
                 pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
@@ -93,6 +98,8 @@ class FunnelAe(PreTrainedModel):
 
         self.encoder = FunnelEncoder(config)
         self.decoder = FunnelAeDecoder(config)
+
+        self.skip_connection_wieghts = torch.zeros(self.config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -181,12 +188,13 @@ class FunnelAe(PreTrainedModel):
         )
 
         decoder_outputs = self.decoder(
-            encoder_hidden_states
+            encoder_hidden_states,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            skip_connection_wieghts=self.skip_connection_wieghts
         )
 
         if not return_dict:

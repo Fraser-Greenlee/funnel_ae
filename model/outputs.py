@@ -7,7 +7,7 @@ from transformers.modeling_outputs import Seq2SeqLMOutput
 
 
 @dataclass
-class Seq2SeqLMVaeOutput(Seq2SeqLMOutput):
+class Seq2SeqLMAeOutput(Seq2SeqLMOutput):
     latent: torch.FloatTensor = None
     reconstructed_encoding: torch.FloatTensor = None
 
@@ -15,7 +15,7 @@ class Seq2SeqLMVaeOutput(Seq2SeqLMOutput):
 @dataclass
 class BaseVaeOutput(ModelOutput):
     """
-    Base class for a VAE's outputs.
+    Base class for an VAE's outputs.
 
     Args:
         reconstructed_encoding (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`):

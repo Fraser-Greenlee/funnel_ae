@@ -2,21 +2,20 @@ import torch
 from torch.nn import functional as F
 from transformers.trainer import Trainer
 
-from model.reg_loss import REG_LOSSES
 
-
-class VaeTrainer(Trainer):
+class AeTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.reg_loss = REG_LOSSES[self.args.reg_loss_type]
+        self.n_pools = len(self.model.config.block_sizes)
 
-    def reg_weight(self):
+    def skip_connection_weights(self):
         if self.state.global_step is None:
             return 0
 
-        return torch.sigmoid(
-            torch.tensor(self.state.global_step * self.args.reg_schedule_k - self.args.reg_schedule_b)
-        ).item()
+        base_weight = self.state.global_step * self.args.skip_conn_schedule_k - self.args.skip_conn_schedule_b
+        skip_conn_offsets = torch.arange(0, self.self.n_pools) * self.args.skip_conn_schedule_b_offset
+
+        return torch.sigmoid(base_weight - skip_conn_offsets).item()
 
     def compute_loss(self, model, inputs, return_outputs=False):
         if self.label_smoother is not None and "labels" in inputs:
@@ -24,6 +23,7 @@ class VaeTrainer(Trainer):
         else:
             labels = None
 
+        model.skip_connection_wieghts = self.skip_connection_weights()
         outputs = model(**inputs)
 
         # Save past state if it exists
