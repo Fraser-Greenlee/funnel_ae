@@ -1,9 +1,9 @@
-from transformers import EncoderDecoderConfig
+from transformers import FunnelConfig
 
 
 # TODO mix with FunnelConfig
 
-class FunnelAeConfig(EncoderDecoderConfig):
+class FunnelAeConfig(FunnelConfig):
     model_type = "ae"
     is_composition = True
 
@@ -13,13 +13,13 @@ class FunnelAeConfig(EncoderDecoderConfig):
         latent_size=32,
         share_embeddings=True,
 
-        vae_encoder_n_layers=1,
-        vae_encoder_use_dropout=False,
+        ae_encoder_n_layers=1,
+        ae_encoder_use_dropout=False,
 
-        vae_decoder_n_layers=1,
-        vae_decoder_use_dropout=False,
-        vae_decoder_use_layer_norm=False,
-        vae_decoder_layer_norm_eps=1e-09,
+        ae_decoder_n_layers=1,
+        ae_decoder_use_dropout=False,
+        ae_decoder_use_layer_norm=False,
+        ae_decoder_layer_norm_eps=1e-09,
 
         **kwargs
     ):
@@ -30,12 +30,10 @@ class FunnelAeConfig(EncoderDecoderConfig):
         self.latent_size = latent_size
         self.share_embeddings = share_embeddings
 
-        self.vae_encoder_n_layers = vae_encoder_n_layers
-        self.vae_encoder_use_dropout = vae_encoder_use_dropout
+        self.ae_encoder_n_layers = ae_encoder_n_layers
+        self.ae_encoder_use_dropout = ae_encoder_use_dropout
 
-        self.vae_decoder_n_layers = vae_decoder_n_layers
-        self.vae_decoder_use_dropout = vae_decoder_use_dropout
-        self.vae_decoder_use_layer_norm = vae_decoder_use_layer_norm
-        self.vae_decoder_layer_norm_eps = vae_decoder_layer_norm_eps
-
-        self.is_encoder_decoder = True
+        self.ae_decoder_n_layers = ae_decoder_n_layers
+        self.ae_decoder_use_dropout = ae_decoder_use_dropout
+        self.ae_decoder_use_layer_norm = ae_decoder_use_layer_norm
+        self.ae_decoder_layer_norm_eps = ae_decoder_layer_norm_eps

@@ -18,6 +18,145 @@ from model.config import FunnelAeConfig
 logger = logging.get_logger(__name__)
 
 
+class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
+    def __init__(self, config):
+        super().__init__(config)
+        # Track where we are at in terms of pooling from the original input, e.g., by how much the sequence length was
+        # divided.
+        del self.pooling_mult
+        self.upsampling_mult = None
+
+    def stride_upsample_pos(self, pos_id, block_index):
+        """
+        Upsample `pos_id` while keeping the cls token separate (if `config.separate_cls=True`).
+        """
+        # TODO
+        if self.config.separate_cls:
+            # Under separate <cls>, we treat the <cls> as the first token in
+            # the previous block of the 1st real block. Since the 1st real
+            # block always has position 1, the position of the previous block
+            # will be at `1 - 2 ** block_index`.
+            cls_pos = pos_id.new_tensor([-(2 ** block_index) + 1])
+            pooled_pos_id = pos_id[1:-1] if self.config.truncate_seq else pos_id[1:]
+            return torch.cat([cls_pos, pooled_pos_id[::2]], 0)
+        else:
+            return pos_id[::2]
+
+    def relative_pos(self, pos, stride, upsampled_pos=None, shift=1):
+        """
+        Build the relative positional vector between `pos` and `upsampled_pos`.
+        """
+        # TODO
+        if upsampled_pos is None:
+            upsampled_pos = pos
+
+        ref_point = upsampled_pos[0] - pos[0]
+        num_remove = shift * len(upsampled_pos)
+        max_dist = ref_point + num_remove * stride
+        min_dist = upsampled_pos[0] - pos[-1]
+
+        return torch.arange(max_dist, min_dist - 1, -stride, dtype=torch.long, device=pos.device)
+
+    def stride_upsample(self, tensor, axis):
+        """
+        Perform upsample by stride slicing the tensor along the given axis.
+        """
+        if tensor is None:
+            return None
+
+        # Do the stride pool recursively if axis is a list or a tuple of ints.
+        if isinstance(axis, (list, tuple)):
+            for ax in axis:
+                tensor = self.stride_upsample(tensor, ax)
+            return tensor
+
+        # Do the stride pool recursively if tensor is a list or tuple of tensors.
+        if isinstance(tensor, (tuple, list)):
+            return type(tensor)(self.stride_upsample(x, axis) for x in tensor)
+
+        # Deal with negative axis
+        axis %= tensor.ndim
+
+        axis_slice = (
+            slice(None, -1, 2) if self.config.separate_cls and self.config.truncate_seq else slice(None, None, 2)
+        )
+        enc_slice = [slice(None)] * axis + [axis_slice]
+        if self.config.separate_cls:
+            cls_slice = [slice(None)] * axis + [slice(None, 1)]
+            tensor = torch.cat([tensor[cls_slice], tensor], axis=axis)
+        return tensor[enc_slice]
+
+    def upsample_tensor(self, tensor, mode="mean", stride=2):
+        """Apply 1D upsample to a tensor of size [B x T (x H)]."""
+        # TODO
+        if tensor is None:
+            return None
+
+        # Do the upsample recursively if tensor is a list or tuple of tensors.
+        if isinstance(tensor, (tuple, list)):
+            return type(tensor)(self.upsample_tensor(tensor, mode=mode, stride=stride) for x in tensor)
+
+        if self.config.separate_cls:
+            suffix = tensor[:, :-1] if self.config.truncate_seq else tensor
+            tensor = torch.cat([tensor[:, :1], suffix], dim=1)
+
+        ndim = tensor.ndim
+        if ndim == 2:
+            tensor = tensor[:, None, :, None]
+        elif ndim == 3:
+            tensor = tensor[:, None, :, :]
+        # Stride is applied on the second-to-last dimension.
+        stride = (stride, 1)
+
+        if mode == "mean":
+            tensor = nn.functional.avg_pool2d(tensor, stride, stride=stride, ceil_mode=True)
+        elif mode == "max":
+            tensor = nn.functional.max_pool2d(tensor, stride, stride=stride, ceil_mode=True)
+        elif mode == "min":
+            tensor = -nn.functional.max_pool2d(-tensor, stride, stride=stride, ceil_mode=True)
+        else:
+            raise NotImplementedError("The supported modes are 'mean', 'max' and 'min'.")
+
+        if ndim == 2:
+            return tensor[:, 0, :, 0]
+        elif ndim == 3:
+            return tensor[:, 0]
+        return tensor
+
+    def pre_attention_upsampling(self, output, attention_inputs):
+        """Upsample `output` and the proper parts of `attention_inputs` before the attention layer."""
+        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
+        if self.config.pool_q_only:
+            if self.config.attention_type == "factorized":
+                position_embeds = self.stride_upsample(position_embeds[:2], 0) + position_embeds[2:]
+            token_type_mat = self.stride_upsample(token_type_mat, 1)
+            cls_mask = self.stride_upsample(cls_mask, 0)
+            output = self.upsample_tensor(output, mode=self.config.pooling_type)
+        else:
+            self.upsampling_mult *= 2
+            if self.config.attention_type == "factorized":
+                position_embeds = self.stride_upsample(position_embeds, 0)
+            token_type_mat = self.stride_upsample(token_type_mat, [1, 2])
+            cls_mask = self.stride_upsample(cls_mask, [1, 2])
+            attention_mask = self.upsample_tensor(attention_mask, mode="min")
+            output = self.upsample_tensor(output, mode=self.config.pooling_type)
+        attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
+        return output, attention_inputs
+
+    def post_attention_upsampling(self, attention_inputs):
+        """Upsample the proper parts of `attention_inputs` after the attention layer."""
+        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
+        if self.config.pool_q_only:
+            self.upsampling_mult *= 2
+            if self.config.attention_type == "factorized":
+                position_embeds = position_embeds[:2] + self.stride_upsample(position_embeds[2:], 0)
+            token_type_mat = self.stride_upsample(token_type_mat, 2)
+            cls_mask = self.stride_upsample(cls_mask, 1)
+            attention_mask = self.upsample_tensor(attention_mask, mode="min")
+        attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
+        return attention_inputs
+
+
 class FunnelAeDecoder(FunnelEncoder):
     def __init__(self, config):
         super().__init__()
@@ -62,7 +201,7 @@ class FunnelAeDecoder(FunnelEncoder):
             # TODO use skip_connection_wieghts[block_index]
             breakpoint()
             if upsample_flag:
-                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
+                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_upsample(
                     hidden, attention_inputs
                 )
             for (layer_index, layer) in enumerate(block):
@@ -76,7 +215,7 @@ class FunnelAeDecoder(FunnelEncoder):
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
                     hidden = layer_output[0]
                     if do_upsample:
-                        attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
+                        attention_inputs = self.attention_structure.post_attention_upsample(attention_inputs)
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
