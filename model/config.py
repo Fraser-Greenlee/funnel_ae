@@ -10,7 +10,8 @@ class FunnelAeConfig(FunnelConfig):
     def __init__(
         self,
 
-        upsampling_type='bilinear',
+        use_attention_upsample=False,
+        attention_upsampling_type='bilinear',
 
         latent_size=32,
 
@@ -26,7 +27,8 @@ class FunnelAeConfig(FunnelConfig):
     ):
         super().__init__(**kwargs)
 
-        self.upsampling_type = upsampling_type
+        self.use_attention_upsample = use_attention_upsample
+        self.attention_upsampling_type = attention_upsampling_type
 
         self.latent_size = latent_size
 

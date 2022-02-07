@@ -212,7 +212,7 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
                 position_embeds = self.stride_upsample(position_embeds[:2], 0) + position_embeds[2:]
             token_type_mat = self.stride_upsample(token_type_mat, 1)
             cls_mask = self.stride_upsample(cls_mask, 0)
-            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
+            output = self.upsample_tensor(output, mode=self.config.attention_upsampling_type)
         else:
             self.upsampling_mult *= 2
             if self.config.attention_type == "factorized":
@@ -220,7 +220,7 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
             token_type_mat = self.stride_upsample(token_type_mat, [1, 2])
             cls_mask = self.stride_upsample(cls_mask, [1, 2])
             attention_mask = self.upsample_tensor(attention_mask, mode="nearest")
-            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
+            output = self.upsample_tensor(output, mode=self.config.attention_upsampling_type)
         attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
         return output, attention_inputs
 
@@ -242,7 +242,7 @@ class FunnelAeDecoder(FunnelEncoder):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.attention_structure = FunnelAttentionStructure(config)
+        self.attention_structure = FunnelAttentionUpsampleStructure(config) if config.use_attention_upsample else FunnelAttentionStructure(config)
         self.blocks = nn.ModuleList(
             [
                 nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
@@ -274,20 +274,28 @@ class FunnelAeDecoder(FunnelEncoder):
 
         all_hidden_states = (hidden_states,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
+        use_attn_upsample = self.config.use_attention_upsample
+        upsampled_hidden = None
 
         for block_index, block in enumerate(self.blocks):
             upsample_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             upsample_flag = upsample_flag and block_index > 0
-            # TODO can I pre_attention_upsampling?
-            # TODO use skip_connection_wieghts[block_index]
-            breakpoint()
+
             if upsample_flag:
-                upsampled_hidden, attention_inputs = self.attention_structure.pre_attention_upsampling(
-                    hidden, attention_inputs
-                )
+                if use_attn_upsample:
+                    raise NotImplementedError('Yet to finish attention upsample.')
+                    upsampled_hidden, attention_inputs = self.attention_structure.pre_attention_upsampling(
+                        hidden, attention_inputs
+                    )
+                else:
+                    hidden = upsample(
+                        hidden, stride=2, target_len=hidden.shape[1] * 2,
+                        separate_cls=self.config.separate_cls, truncate_seq=self.config.truncate_seq
+                    )
+
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
-                    do_upsample = (repeat_index == 0) and (layer_index == 0) and upsample_flag
+                    do_upsample = (repeat_index == 0) and (layer_index == 0) and upsample_flag and use_attn_upsample
                     if do_upsample:
                         query = upsampled_hidden
                         key = value = hidden if self.config.pool_q_only else upsampled_hidden
@@ -469,6 +477,8 @@ class FunnelAeForAutoencoding(FunnelPreTrainedModel):
         super().__init__(config)
 
         self.funnel = FunnelAeBaseModel(config)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size)
+
         # Initialize weights and apply final processing
         self.post_init()
 
