@@ -8,10 +8,10 @@ from transformers.utils import logging
 from transformers.models.funnel.modeling_funnel import (
     FunnelEncoder, FunnelAttentionStructure, FunnelLayer, upsample
 )
+from transformers.modeling_outputs import BaseModelOutput
 from transformers import (
     FunnelPreTrainedModel,
     PretrainedConfig,
-    BaseModelOutput
 )
 
 from model.config import FunnelAeConfig
@@ -165,6 +165,10 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
         if self.config.separate_cls:
             cls_slice = [slice(None)] * axis + [slice(None, 1)]
             tensor = torch.cat([tensor[cls_slice], tensor], axis=axis)
+
+        # TODO switch to pooling
+        breakpoint()
+
         return tensor[enc_slice]
 
     def upsample_tensor(self, tensor, mode="bilinear"):
@@ -207,12 +211,12 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
     def pre_attention_upsampling(self, output, attention_inputs):
         """Upsample `output` and the proper parts of `attention_inputs` before the attention layer."""
         position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
-        if self.config.pool_q_only:
+        if self.config.upsample_q_only:
             if self.config.attention_type == "factorized":
                 position_embeds = self.stride_upsample(position_embeds[:2], 0) + position_embeds[2:]
             token_type_mat = self.stride_upsample(token_type_mat, 1)
             cls_mask = self.stride_upsample(cls_mask, 0)
-            output = self.upsample_tensor(output, mode=self.config.attention_upsampling_type)
+            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
         else:
             self.upsampling_mult *= 2
             if self.config.attention_type == "factorized":
@@ -220,14 +224,14 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
             token_type_mat = self.stride_upsample(token_type_mat, [1, 2])
             cls_mask = self.stride_upsample(cls_mask, [1, 2])
             attention_mask = self.upsample_tensor(attention_mask, mode="nearest")
-            output = self.upsample_tensor(output, mode=self.config.attention_upsampling_type)
+            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
         attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
         return output, attention_inputs
 
     def post_attention_upsampling(self, attention_inputs):
         """Upsample the proper parts of `attention_inputs` after the attention layer."""
         position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
-        if self.config.pool_q_only:
+        if self.config.upsample_q_only:
             self.upsampling_mult *= 2
             if self.config.attention_type == "factorized":
                 position_embeds = position_embeds[:2] + self.stride_upsample(position_embeds[2:], 0)
@@ -274,36 +278,26 @@ class FunnelAeDecoder(FunnelEncoder):
 
         all_hidden_states = (hidden_states,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
-        use_attn_upsample = self.config.use_attention_upsample
         upsampled_hidden = None
 
         for block_index, block in enumerate(self.blocks):
-            upsample_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
-            upsample_flag = upsample_flag and block_index > 0
-
-            if upsample_flag:
-                if use_attn_upsample:
-                    raise NotImplementedError('Yet to finish attention upsample.')
-                    upsampled_hidden, attention_inputs = self.attention_structure.pre_attention_upsampling(
-                        hidden, attention_inputs
-                    )
-                else:
-                    hidden = upsample(
-                        hidden, stride=2, target_len=hidden.shape[1] * 2,
-                        separate_cls=self.config.separate_cls, truncate_seq=self.config.truncate_seq
-                    )
-
+            upsampling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
+            upsampling_flag = upsampling_flag and block_index > 0
+            if upsampling_flag:
+                upsampled_hidden, attention_inputs = self.attention_structure.pre_attention_upsampling(
+                    hidden, attention_inputs
+                )
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
-                    do_upsample = (repeat_index == 0) and (layer_index == 0) and upsample_flag and use_attn_upsample
-                    if do_upsample:
+                    do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
+                    if do_upsampling:
                         query = upsampled_hidden
-                        key = value = hidden if self.config.pool_q_only else upsampled_hidden
+                        key = value = hidden if self.config.upsample_q_only else upsampled_hidden
                     else:
                         query = key = value = hidden
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
                     hidden = layer_output[0]
-                    if do_upsample:
+                    if do_upsampling:
                         attention_inputs = self.attention_structure.post_attention_upsampling(attention_inputs)
 
                     if output_attentions:
