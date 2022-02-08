@@ -1,9 +1,10 @@
-from typing import Optional
+from typing import List, Optional, Tuple
+
 import torch
 from dataclasses import dataclass
 from transformers.file_utils import ModelOutput
 
-from transformers.modeling_outputs import Seq2SeqLMOutput
+from transformers.modeling_outputs import Seq2SeqLMOutput, BaseModelOutput
 
 
 @dataclass
@@ -29,3 +30,8 @@ class BaseVaeOutput(ModelOutput):
     latent: torch.FloatTensor = None
     reconstructed_encoding: torch.FloatTensor = None
     reg_loss: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class TrackAttentionInputsOutput(BaseModelOutput):
+    all_attention_inputs: List[Tuple[torch.tensor]] = None
