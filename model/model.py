@@ -6,7 +6,7 @@ from torch.nn import CrossEntropyLoss
 
 from transformers.utils import logging
 from transformers.models.funnel.modeling_funnel import (
-    FunnelEncoder, FunnelAttentionStructure, FunnelLayer, upsample
+    FunnelEncoder, FunnelAttentionStructure, FunnelLayer
 )
 from transformers.modeling_outputs import BaseModelOutput
 from transformers import (
@@ -15,128 +15,25 @@ from transformers import (
 )
 
 from model.config import FunnelAeConfig
-from model.outputs import AutoEncOutput
+from model.outputs import AutoEncOutput, TrackAttentionInputsOutput
 
 
 logger = logging.get_logger(__name__)
 
 
-class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
+class FunnelAttentionUpsampleStructure(nn.Module):
+    """
+    Contains helpers for `FunnelRelMultiheadAttention`.
+    """
+
+    cls_token_type_id: int = 2
+
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         # Track where we are at in terms of upsampling from the original input, e.g., by how much the sequence length was
-        # divided.
-        del self.upsampling_mult
+        # multiplied.
         self.upsampling_mult = None
-
-    def get_position_embeds(self, seq_len, dtype, device):
-        """
-        Create and cache inputs related to relative position encoding. Those are very different depending on whether we
-        are using the factorized or the relative shift attention:
-
-        For the factorized attention, it returns the matrices (phi, pi, psi, omega) used in the paper, appendix A.2.2,
-        final formula.
-
-        For the relative shift attention, it returns all possible vectors R used in the paper, appendix A.2.1, final
-        formula.
-
-        Paper link: https://arxiv.org/abs/2006.03236
-        """
-        d_model = self.config.d_model
-        if self.config.attention_type == "factorized":
-            # Notations from the paper, appending A.2.2, final formula.
-            # We need to create and return the matrices phi, psi, pi and omega.
-            pos_seq = torch.arange(0, seq_len, 1.0, dtype=dtype, device=device)
-            freq_seq = torch.arange(0, d_model // 2, 1.0, dtype=dtype, device=device)
-            inv_freq = 1 / (10000 ** (freq_seq / (d_model // 2)))
-            sinusoid = pos_seq[:, None] * inv_freq[None]
-            sin_embed = torch.sin(sinusoid)
-            sin_embed_d = self.sin_dropout(sin_embed)
-            cos_embed = torch.cos(sinusoid)
-            cos_embed_d = self.cos_dropout(cos_embed)
-            # This is different from the formula on the paper...
-            phi = torch.cat([sin_embed_d, sin_embed_d], dim=-1)
-            psi = torch.cat([cos_embed, sin_embed], dim=-1)
-            pi = torch.cat([cos_embed_d, cos_embed_d], dim=-1)
-            omega = torch.cat([-sin_embed, cos_embed], dim=-1)
-            return (phi, pi, psi, omega)
-        else:
-            # Notations from the paper, appending A.2.1, final formula.
-            # We need to create and return all the possible vectors R for all blocks and shifts.
-            freq_seq = torch.arange(0, d_model // 2, 1.0, dtype=dtype, device=device)
-            inv_freq = 1 / (10000 ** (freq_seq / (d_model // 2)))
-            # Maximum relative positions for the first input
-            rel_pos_id = torch.arange(-seq_len * 2, seq_len * 2, 1.0, dtype=dtype, device=device)
-            zero_offset = seq_len * 2
-            sinusoid = rel_pos_id[:, None] * inv_freq[None]
-            sin_embed = self.sin_dropout(torch.sin(sinusoid))
-            cos_embed = self.cos_dropout(torch.cos(sinusoid))
-            pos_embed = torch.cat([sin_embed, cos_embed], dim=-1)
-
-            pos = torch.arange(0, seq_len, dtype=dtype, device=device)
-            upsampled_pos = pos
-            position_embeds_list = []
-            for block_index in range(0, self.config.num_blocks):
-                # For each block with block_index > 0, we need two types position embeddings:
-                #   - Attention(upsampled-q, unupsampled-kv)
-                #   - Attention(upsampled-q, upsampled-kv)
-                # For block_index = 0 we only need the second one and leave the first one as None.
-
-                # First type
-                if block_index == 0:
-                    position_embeds_upsampling = None
-                else:
-                    upsampled_pos = self.stride_upsample_pos(pos, block_index)
-
-                    # construct rel_pos_id
-                    stride = 2 ** (block_index - 1)
-                    rel_pos = self.relative_pos(pos, stride, upsampled_pos, shift=2)
-                    rel_pos = rel_pos[:, None] + zero_offset
-                    rel_pos = rel_pos.expand(rel_pos.size(0), d_model)
-                    position_embeds_upsampling = torch.gather(pos_embed, 0, rel_pos)
-
-                # Second type
-                pos = upsampled_pos
-                stride = 2 ** block_index
-                rel_pos = self.relative_pos(pos, stride)
-
-                rel_pos = rel_pos[:, None] + zero_offset
-                rel_pos = rel_pos.expand(rel_pos.size(0), d_model)
-                position_embeds_no_upsampling = torch.gather(pos_embed, 0, rel_pos)
-
-                position_embeds_list.append([position_embeds_no_upsampling, position_embeds_upsampling])
-            return position_embeds_list
-
-    def stride_upsample_pos(self, pos_id, block_index):
-        """
-        Upsample `pos_id` while keeping the cls token separate (if `config.separate_cls=True`).
-        """
-        # TODO
-        if self.config.separate_cls:
-            # Under separate <cls>, we treat the <cls> as the first token in
-            # the previous block of the 1st real block. Since the 1st real
-            # block always has position 1, the position of the previous block
-            # will be at `1 - 2 ** block_index`.
-            cls_pos = pos_id.new_tensor([-(2 ** block_index) + 1])
-            upsampled_pos_id = pos_id[1:-1] if self.config.truncate_seq else pos_id[1:]
-            return torch.cat([cls_pos, upsampled_pos_id[::2]], 0)
-        else:
-            return pos_id[::2]
-
-    def relative_pos(self, pos, stride, upsampled_pos=None, shift=1):
-        """
-        Build the relative positional vector between `pos` and `upsampled_pos`.
-        """
-        # TODO
-        if upsampled_pos is None:
-            upsampled_pos = pos
-
-        ref_point = upsampled_pos[0] - pos[0]
-        num_remove = shift * len(upsampled_pos)
-        max_dist = ref_point + num_remove * stride
-        min_dist = upsampled_pos[0] - pos[-1]
-
-        return torch.arange(max_dist, min_dist - 1, -stride, dtype=torch.long, device=pos.device)
 
     def stride_upsample(self, tensor, axis):
         """
@@ -208,45 +105,77 @@ class FunnelAttentionUpsampleStructure(FunnelAttentionStructure):
             return tensor[:, 0]
         return tensor
 
-    def pre_attention_upsampling(self, output, attention_inputs):
-        """Upsample `output` and the proper parts of `attention_inputs` before the attention layer."""
-        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
-        if self.config.upsample_q_only:
-            if self.config.attention_type == "factorized":
-                position_embeds = self.stride_upsample(position_embeds[:2], 0) + position_embeds[2:]
-            token_type_mat = self.stride_upsample(token_type_mat, 1)
-            cls_mask = self.stride_upsample(cls_mask, 0)
-            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
-        else:
-            self.upsampling_mult *= 2
-            if self.config.attention_type == "factorized":
-                position_embeds = self.stride_upsample(position_embeds, 0)
-            token_type_mat = self.stride_upsample(token_type_mat, [1, 2])
-            cls_mask = self.stride_upsample(cls_mask, [1, 2])
-            attention_mask = self.upsample_tensor(attention_mask, mode="nearest")
-            output = self.upsample_tensor(output, mode=self.config.upsampling_type)
-        attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
-        return output, attention_inputs
 
-    def post_attention_upsampling(self, attention_inputs):
-        """Upsample the proper parts of `attention_inputs` after the attention layer."""
-        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
-        if self.config.upsample_q_only:
-            self.upsampling_mult *= 2
-            if self.config.attention_type == "factorized":
-                position_embeds = position_embeds[:2] + self.stride_upsample(position_embeds[2:], 0)
-            token_type_mat = self.stride_upsample(token_type_mat, 2)
-            cls_mask = self.stride_upsample(cls_mask, 1)
-            attention_mask = self.upsample_tensor(attention_mask, mode="nearest")
-        attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
-        return attention_inputs
-
-
-class FunnelAeDecoder(FunnelEncoder):
+class FunnelEncoderSaveAttentionInputs(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.attention_structure = FunnelAttentionUpsampleStructure(config) if config.use_attention_upsample else FunnelAttentionStructure(config)
+        self.attention_structure = FunnelAttentionStructure(config)
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
+                for block_index, block_size in enumerate(config.block_sizes)
+            ]
+        )
+
+    def forward(
+        self,
+        inputs_embeds,
+        attention_mask=None,
+        token_type_ids=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+    ):
+        # The pooling is not implemented on long tensors, so we convert this mask.
+        attention_mask = attention_mask.type_as(inputs_embeds)
+        attention_inputs = self.attention_structure.init_attention_inputs(
+            inputs_embeds,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
+        hidden = inputs_embeds
+        all_attention_inputs = [attention_inputs]
+
+        all_hidden_states = (inputs_embeds,) if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+
+        for block_index, block in enumerate(self.blocks):
+            pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
+            pooling_flag = pooling_flag and block_index > 0
+            if pooling_flag:
+                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
+                    hidden, attention_inputs
+                )
+                all_attention_inputs.append(attention_inputs)
+            for (layer_index, layer) in enumerate(block):
+                for repeat_index in range(self.config.block_repeats[block_index]):
+                    do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
+                    if do_pooling:
+                        query = pooled_hidden
+                        key = value = hidden if self.config.pool_q_only else pooled_hidden
+                    else:
+                        query = key = value = hidden
+                    layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
+                    hidden = layer_output[0]
+                    if do_pooling:
+                        attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
+                        all_attention_inputs.append(attention_inputs)
+
+                    if output_attentions:
+                        all_attentions = all_attentions + layer_output[1:]
+                    if output_hidden_states:
+                        all_hidden_states = all_hidden_states + (hidden,)
+
+        if not return_dict:
+            return tuple(v for v in [hidden, all_hidden_states, all_attentions] if v is not None)
+        return TrackAttentionInputsOutput(last_hidden_state=hidden, hidden_states=all_hidden_states, attentions=all_attentions, all_attention_inputs=all_attention_inputs)
+
+
+class FunnelAeDecoder(nn.Module):
+    def __init__(self, config):
+        self.config = config
+        self.attention_structure = FunnelAttentionUpsampleStructure(config)
         self.blocks = nn.ModuleList(
             [
                 nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
@@ -257,7 +186,7 @@ class FunnelAeDecoder(FunnelEncoder):
     def forward(
         self,
         hidden_states,
-        attention_mask=None,
+        all_attention_inputs,
         token_type_ids=None,
         output_attentions=False,
         output_hidden_states=False,
@@ -267,13 +196,6 @@ class FunnelAeDecoder(FunnelEncoder):
         if skip_connection_wieghts is None:
             skip_connection_wieghts = torch.zeros(len(self.blocks))
 
-        # The upsampling is not implemented on long tensors, so we convert this mask.
-        attention_mask = attention_mask.type_as(hidden_states)
-        attention_inputs = self.attention_structure.init_attention_inputs(
-            hidden_states,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
         hidden = hidden_states
 
         all_hidden_states = (hidden_states,) if output_hidden_states else None
@@ -284,9 +206,7 @@ class FunnelAeDecoder(FunnelEncoder):
             upsampling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             upsampling_flag = upsampling_flag and block_index > 0
             if upsampling_flag:
-                upsampled_hidden, attention_inputs = self.attention_structure.pre_attention_upsampling(
-                    hidden, attention_inputs
-                )
+                upsampled_hidden = self.attention_structure.upsample_tensor(hidden, mode=self.config.upsampling_type)
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
                     do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
@@ -295,10 +215,8 @@ class FunnelAeDecoder(FunnelEncoder):
                         key = value = hidden if self.config.upsample_q_only else upsampled_hidden
                     else:
                         query = key = value = hidden
-                    layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
+                    layer_output = layer(query, key, value, all_attention_inputs[-block_index], output_attentions=output_attentions)
                     hidden = layer_output[0]
-                    if do_upsampling:
-                        attention_inputs = self.attention_structure.post_attention_upsampling(attention_inputs)
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
@@ -427,6 +345,7 @@ class FunnelAeBaseModel(FunnelAePreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
+        # TODO: need to get encoder_hidden_states.all_attentions regardless of return_dict
         encoder_hidden_states = self.encoder(
             inputs_embeds,
             attention_mask=attention_mask,
