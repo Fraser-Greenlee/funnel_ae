@@ -1,8 +1,6 @@
 from transformers import FunnelConfig
 
 
-# TODO mix with FunnelConfig
-
 class FunnelAeConfig(FunnelConfig):
     model_type = "ae"
     is_composition = True
