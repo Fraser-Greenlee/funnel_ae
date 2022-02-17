@@ -1,6 +1,7 @@
+from dataclasses import dataclass
 import numpy as np
 import torch
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 from torch import Tensor, nn
 from torch.nn import CrossEntropyLoss
 
@@ -8,7 +9,7 @@ from transformers.utils import logging
 from transformers.models.funnel.modeling_funnel import (
     upsample, FunnelAttentionStructure, FunnelLayer, FunnelEmbeddings
 )
-from transformers.modeling_outputs import BaseModelOutput
+from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 from transformers import (
     FunnelPreTrainedModel,
     PretrainedConfig,
@@ -109,6 +110,33 @@ class FunnelAttentionUpsampleStructure(nn.Module):
         return tensor
 '''
 
+
+@dataclass
+class SkipConnOutput(ModelOutput):
+    """
+    Base class for model's outputs, with potential hidden states and attentions.
+
+    Args:
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
+
+    skip_indices: List[int] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
 class FunnelEncoderUseSavedAttnInputs(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -126,12 +154,12 @@ class FunnelEncoderUseSavedAttnInputs(nn.Module):
         inputs_embeds,
         all_attention_inputs: Dict[tuple, Tensor],
         output_attentions=False,
-        output_hidden_states=False,
         return_dict=True,
     ):
         hidden = inputs_embeds
 
-        all_hidden_states = (inputs_embeds,) if output_hidden_states else None
+        all_hidden_states = (inputs_embeds,)
+        skip_indices = []
         all_attentions = () if output_attentions else None
 
         for block_index, block in enumerate(self.blocks):
@@ -145,6 +173,7 @@ class FunnelEncoderUseSavedAttnInputs(nn.Module):
                     if do_pooling:
                         query = pooled_hidden
                         key = value = hidden if self.config.pool_q_only else pooled_hidden
+                        skip_indices.append(len(all_hidden_states)-1)
                     else:
                         query = key = value = hidden
 
@@ -155,12 +184,11 @@ class FunnelEncoderUseSavedAttnInputs(nn.Module):
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
-                    if output_hidden_states:
-                        all_hidden_states = all_hidden_states + (hidden,)
+                    all_hidden_states = all_hidden_states + (hidden,)
 
         if not return_dict:
-            return tuple(v for v in [hidden, all_hidden_states, all_attentions] if v is not None)
-        return BaseModelOutput(last_hidden_state=hidden, hidden_states=all_hidden_states, attentions=all_attentions)
+            return tuple(v for v in [skip_indices, all_hidden_states, all_attentions] if v is not None)
+        return SkipConnOutput(skip_indices=skip_indices, hidden_states=all_hidden_states, attentions=all_attentions)
 
 
 class FunnelAeDecoder(nn.Module):
@@ -173,6 +201,7 @@ class FunnelAeDecoder(nn.Module):
                 for block_index, block_size in enumerate(config.block_sizes)
             ]
         )
+        
 
     def upsample_hidden(self, hidden):
         '''
@@ -189,6 +218,7 @@ class FunnelAeDecoder(nn.Module):
     def forward(
         self,
         hidden_states,
+        skip_indices,
         all_attention_inputs: Dict[tuple, Tensor],
         output_attentions=False,
         output_hidden_states=False,
@@ -220,6 +250,12 @@ class FunnelAeDecoder(nn.Module):
 
                     layer_output = layer(query, key, value, all_attention_inputs[(block_index, layer_index)], output_attentions=output_attentions)
                     hidden = layer_output[0]
+
+                    if do_upsampling:
+                        skip_conn_w = skip_connection_wieghts[block_index]
+                        hidden = (
+                            hidden * (1- skip_conn_w) + hidden_states[skip_indices[block_index]] * skip_conn_w
+                        )
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
@@ -259,22 +295,25 @@ class FunnelAePreTrainedModel(FunnelPreTrainedModel):
 
 
 class FunnelAutoEncAttentionStructure(FunnelAttentionStructure):
-    def get_all_attention_inputs(self, inputs_embeds, attention_mask=None, token_type_ids=None):
+    def get_all_attention_inputs(self, encoder, inputs_embeds, attention_mask=None, token_type_ids=None):
+        # The pooling is not implemented on long tensors, so we convert this mask.
+        attention_mask = attention_mask.type_as(inputs_embeds)
+
         attention_inputs = self.init_attention_inputs(
             inputs_embeds, attention_mask=attention_mask, token_type_ids=token_type_ids
         )
         all_attention_inputs = {}
 
         hidden = inputs_embeds
-        for block_index, block in enumerate(self.blocks):
-            pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
+        for block_index, block in enumerate(encoder.blocks):
+            pooling_flag = hidden.size(1) > (2 if encoder.config.separate_cls else 1)
             pooling_flag = pooling_flag and block_index > 0
             if pooling_flag:
-                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
+                pooled_hidden, attention_inputs = self.pre_attention_pooling(
                     hidden, attention_inputs
                 )
             for (layer_index, _layer) in enumerate(block):
-                for repeat_index in range(self.config.block_repeats[block_index]):
+                for repeat_index in range(encoder.config.block_repeats[block_index]):
                     do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
                     if do_pooling:
                         hidden = pooled_hidden
@@ -282,7 +321,7 @@ class FunnelAutoEncAttentionStructure(FunnelAttentionStructure):
                     all_attention_inputs[(block_index, layer_index)] = attention_inputs
 
                     if do_pooling:
-                        attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
+                        attention_inputs = self.post_attention_pooling(attention_inputs)
 
         return all_attention_inputs
 
@@ -376,30 +415,28 @@ class FunnelAeBaseModel(FunnelAePreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        # TODO hanlde all attention inputs separately
-        seq_len = inputs_embeds.size(1)
-
         all_attention_inputs = self.attention_structure.get_all_attention_inputs(
+            self.encoder,
             inputs_embeds,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
 
         encoder_outputs = self.encoder(
-            inputs_embeds, all_attention_inputs,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
+            inputs_embeds,
+            all_attention_inputs,
             output_attentions=output_attentions,
             output_hidden_states=True,
             return_dict=return_dict,
         )
-        encoder_hidden_states, all_attention_inputs = encoder_outputs[0], encoder_outputs[-1]
+        encoder_skip_indices, encoder_hidden_states, all_attention_inputs = encoder_outputs
 
         breakpoint()
 
         decoder_outputs = self.decoder(
             encoder_hidden_states,
-            (position_embeds, ),
+            encoder_skip_indices,
+            all_attention_inputs,
             token_type_ids=token_type_ids,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -412,18 +449,18 @@ class FunnelAeBaseModel(FunnelAePreTrainedModel):
             outputs = (decoder_outputs[0],)
             if output_hidden_states:
                 idx += 1
-                outputs = outputs + (encoder_hidden_states[1] + decoder_outputs[idx],)
+                outputs = outputs + (all_encoder_hidden_states[1] + decoder_outputs[idx],)
             if output_attentions:
                 idx += 1
-                outputs = outputs + (encoder_hidden_states[2] + decoder_outputs[idx],)
+                outputs = outputs + (all_encoder_hidden_states[2] + decoder_outputs[idx],)
             return outputs
 
         return BaseModelOutput(
             last_hidden_state=decoder_outputs[0],
-            hidden_states=(encoder_hidden_states.hidden_states + decoder_outputs.hidden_states)
+            hidden_states=(all_encoder_hidden_states.hidden_states + decoder_outputs.hidden_states)
             if output_hidden_states
             else None,
-            attentions=(encoder_hidden_states.attentions + decoder_outputs.attentions) if output_attentions else None,
+            attentions=(all_encoder_hidden_states.attentions + decoder_outputs.attentions) if output_attentions else None,
         )
 
 

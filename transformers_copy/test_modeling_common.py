@@ -29,7 +29,6 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-import transformers
 from huggingface_hub import Repository, delete_repo, login
 from requests.exceptions import HTTPError
 from transformers import (
@@ -40,15 +39,13 @@ from transformers import (
     is_torch_available,
     logging,
 )
-from transformers.file_utils import WEIGHTS_NAME, is_flax_available, is_torch_fx_available
+from transformers.file_utils import WEIGHTS_NAME
 from transformers.models.auto import get_values
 from transformers.testing_utils import (
     PASS,
     USER,
     CaptureLogger,
     TestCasePlus,
-    is_pt_flax_cross_test,
-    is_pt_tf_cross_test,
     is_staging_test,
     require_torch,
     require_torch_multi_gpu,
