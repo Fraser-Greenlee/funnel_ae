@@ -243,17 +243,6 @@ class FunnelAeModelTest(ModelTesterMixin, unittest.TestCase):
         else ()
     )
 
-    # special case for ForPreTraining model
-    def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
-        inputs_dict = super()._prepare_for_class(inputs_dict, model_class, return_labels=return_labels)
-
-        if return_labels:
-            if model_class in get_values(MODEL_FOR_PRETRAINING_MAPPING):
-                inputs_dict["labels"] = torch.zeros(
-                    (self.model_tester.batch_size, self.model_tester.seq_length), dtype=torch.long, device=torch_device
-                )
-        return inputs_dict
-
     def setUp(self):
         self.model_tester = FunnelAeModelTester(self)
         self.config_tester = ConfigTester(self, config_class=FunnelAeConfig)
@@ -332,6 +321,9 @@ class FunnelBaseModelTest(ModelTesterMixin, unittest.TestCase):
             model = model_class(config)
             model.to(torch_device)
             model.train()
+            inputs_dict["labels"] = torch.zeros(
+                (self.model_tester.batch_size, self.model_tester.seq_length), dtype=torch.long, device=torch_device
+            )
             inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             loss = model(**inputs).loss
             loss.backward()
