@@ -12,6 +12,8 @@ from transformers import (
     FunnelPreTrainedModel, FunnelBaseModel
 )
 
+from model.outputs import AutoEncOutput
+
 
 class FunnelRelMultiheadAttentionUpsampling(FunnelRelMultiheadAttention):
     # TODO impliment upsampling attention
