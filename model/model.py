@@ -201,7 +201,11 @@ class FunnelAeDecoder(FunnelEncoder):
             upsampling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             upsampling_flag = upsampling_flag and block_index > 0
             if upsampling_flag:
-                upsampled_hidden = self.attention_structure.upsample_hidden(hidden)
+                upsampled_hidden = self.attention_structure.upsample_hidden(
+                    hidden[:,1:] if self.config.separate_cls else hidden
+                )
+                if self.config.separate_cls:
+                    upsampled_hidden = torch.cat((hidden[:,:1], upsampled_hidden), axis=1)
                 attention_inputs = all_attention_inputs.pop()
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
