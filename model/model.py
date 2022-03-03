@@ -1,16 +1,18 @@
 from dataclasses import dataclass
 from typing import List, Tuple
+import numpy as np
 from torch import nn
 import torch
 from torch.nn import CrossEntropyLoss
 
 from transformers.modeling_outputs import BaseModelOutput, ModelOutput
 from transformers.models.funnel.modeling_funnel import (
-    FunnelEmbeddings, FunnelEncoder, FunnelLayer, FunnelAttentionStructure, FunnelRelMultiheadAttention
+    FunnelEmbeddings, FunnelLayer, FunnelAttentionStructure, FunnelRelMultiheadAttention
 )
 from transformers import (
     FunnelPreTrainedModel, FunnelBaseModel
 )
+from model.config import FunnelAeConfig
 
 from model.outputs import AutoEncOutput
 
@@ -59,6 +61,7 @@ class FunnelUpsamplingAttentionStructure(FunnelAttentionStructure):
         return attention_inputs
 
     def get_all_attention_inputs(self, cmp_embeds, attention_mask=None, token_type_ids=None):
+        # NOT USED!
         """Returns the attention inputs associated to the inputs of the model."""
         # cmp_embeds has shape batch_size x compressed(seq_len) x d_model
         # attention_mask and token_type_ids have shape batch_size x seq_len
@@ -127,20 +130,20 @@ class FunnelAeEncoder(nn.Module):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
-        all_attention_inputs = [attention_inputs]
+        all_attention_inputs = {}
         hidden = inputs_embeds
 
         all_hidden_states = (inputs_embeds,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
 
         for block_index, block in enumerate(self.blocks):
+            print(block_index)
             pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             pooling_flag = pooling_flag and block_index > 0
             if pooling_flag:
                 pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
                     hidden, attention_inputs
                 )
-                all_attention_inputs.append(attention_inputs)
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
                     do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
@@ -149,11 +152,12 @@ class FunnelAeEncoder(nn.Module):
                         key = value = hidden if self.config.pool_q_only else pooled_hidden
                     else:
                         query = key = value = hidden
+                    print('layer', value.shape)
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
+                    all_attention_inputs[(block_index, layer_index)] = attention_inputs
                     hidden = layer_output[0]
                     if do_pooling:
                         attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
-                        all_attention_inputs.append(attention_inputs)
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
@@ -165,10 +169,19 @@ class FunnelAeEncoder(nn.Module):
         return AttentionInputsOutput(last_hidden_state=hidden, all_attention_inputs=all_attention_inputs, hidden_states=all_hidden_states, attentions=all_attentions)
 
 
-class FunnelAeDecoder(FunnelEncoder):
+class FunnelAeDecoder(nn.Module):
     def __init__(self, config) -> None:
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.attention_structure = FunnelUpsamplingAttentionStructure(config)
+        # TODO wrong `block_index` causes `relative_positional_attention` to fail
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleList([FunnelLayer(config, len(config.block_sizes) - block_index - 1) for _ in range(block_size)])
+                for block_index, block_size in enumerate(config.block_sizes[::-1])
+            ]
+        )
+
 
     def forward(
         self,
@@ -181,15 +194,19 @@ class FunnelAeDecoder(FunnelEncoder):
         output_hidden_states=False,
         return_dict=True,
     ):
+        print('')
+        upsample_inds = []
+        for i, hs in enumerate(encoder_hidden_states):
+            print(hs.shape)
+            if i and hs.size(1) < encoder_hidden_states[i-1].size(1):
+                upsample_inds.append(
+                    len(encoder_hidden_states) - i - 1
+                )
+        print(upsample_inds)
+        print('')
+
         # The pooling is not implemented on long tensors, so we convert this mask.
         attention_mask = attention_mask.type_as(last_hidden_state)
-        if all_attention_inputs is None:
-            all_attention_inputs = self.attention_structure.get_all_attention_inputs(
-                last_hidden_state,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-            )
-        attention_inputs = all_attention_inputs.pop()
         hidden = last_hidden_state
 
         all_hidden_states = (last_hidden_state,) if output_hidden_states else None
@@ -198,15 +215,13 @@ class FunnelAeDecoder(FunnelEncoder):
         # TODO add residual with `encoder_hidden_states`
 
         for block_index, block in enumerate(self.blocks):
-            upsampling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
-            upsampling_flag = upsampling_flag and block_index > 0
+            upsampling_flag = block_index in upsample_inds
             if upsampling_flag:
                 upsampled_hidden = self.attention_structure.upsample_hidden(
                     hidden[:,1:] if self.config.separate_cls else hidden
                 )
                 if self.config.separate_cls:
                     upsampled_hidden = torch.cat((hidden[:,:1], upsampled_hidden), axis=1)
-                attention_inputs = all_attention_inputs.pop()
             for (layer_index, layer) in enumerate(block):
                 for repeat_index in range(self.config.block_repeats[block_index]):
                     do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
@@ -217,12 +232,20 @@ class FunnelAeDecoder(FunnelEncoder):
                     else:
                         query = key = value = hidden
                     try:
-                        layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
+                        # TODO: needs to use all_attention_inputs[-1]
+                        print('layer', query.shape)
+                        layer_output = layer(query, key, value, all_attention_inputs[(len(self.blocks) - block_index - 1, layer_index)], output_attentions=output_attentions)
                     except Exception:
+                        z = 1
+                        for i, at_in in enumerate(all_attention_inputs):
+                            try:
+                                print('run', i, 'shape', at_in[2].shape)
+                                layer(query, key, value, at_in, output_attentions=output_attentions)
+                                print('passed!')
+                            except Exception:
+                                pass
                         breakpoint()
                     hidden = layer_output[0]
-                    if do_upsampling:
-                        attention_inputs = all_attention_inputs.pop()
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
@@ -244,6 +267,33 @@ class FunnelModelOutput(ModelOutput):
 
 
 class FunnelAeBaseModel(FunnelBaseModel):
+
+    config_class = FunnelAeConfig
+
+    def _init_weights(self, module):
+        classname = module.__class__.__name__
+        if classname.find("Linear") != -1:
+            if getattr(module, "weight", None) is not None:
+                if self.config.initializer_std is None:
+                    fan_out, fan_in = module.weight.shape
+                    std = np.sqrt(1.0 / float(fan_in + fan_out))
+                else:
+                    std = self.config.initializer_std
+                nn.init.normal_(module.weight, std=std)
+            if getattr(module, "bias", None) is not None:
+                nn.init.constant_(module.bias, 0.0)
+        elif classname == "FunnelRelMultiheadAttention":
+            nn.init.uniform_(module.r_w_bias, b=self.config.initializer_range)
+            nn.init.uniform_(module.r_r_bias, b=self.config.initializer_range)
+            nn.init.uniform_(module.r_kernel, b=self.config.initializer_range)
+            nn.init.uniform_(module.r_s_bias, b=self.config.initializer_range)
+            nn.init.uniform_(module.seg_embed, b=self.config.initializer_range)
+        elif classname == "FunnelEmbeddings":
+            std = 1.0 if self.config.initializer_std is None else self.config.initializer_std
+            nn.init.normal_(module.word_embeddings.weight, std=std)
+            if module.word_embeddings.padding_idx is not None:
+                module.word_embeddings.weight.data[module.word_embeddings.padding_idx].zero_()
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -316,6 +366,28 @@ class FunnelAeBaseModel(FunnelBaseModel):
         output_hidden_states=None,
         return_dict=None,
     ):
+        # TODO add padding support
+        if input_ids is not None and input_ids.size(1) % 2 == 1:
+            pad = torch.tensor([self.config.pad_token_id])
+            input_ids = torch.cat((input_ids, pad.expand(input_ids.size(0), 1)), axis=1)
+
+        if attention_mask is not None and attention_mask.size(1) % 2 == 1:
+            pad = torch.tensor([0])
+            attention_mask = torch.cat((attention_mask, pad.expand(attention_mask.size(0), 1)), axis=1)
+
+        if inputs_embeds is not None and inputs_embeds.size(1) % 2 == 1:
+            pad = torch.tensor([self.config.pad_token_id])
+            pad_embed = self.embeddings(pad)
+            inputs_embeds = torch.cat((inputs_embeds, pad_embed.expand(inputs_embeds.size(0), 1, inputs_embeds.size(2))), axis=1)
+
+        if position_ids is not None and position_ids.size(1) % 2 == 1:
+            breakpoint()
+
+        if token_type_ids is not None and token_type_ids.size(1) % 2 == 1:
+            pad = torch.tensor([0])
+            # TODO is this the way to pad token_type_ids?
+            token_type_ids = torch.cat((token_type_ids, pad.expand(token_type_ids.size(0), 1)), axis=1)
+
         (
             inputs_embeds,
             attention_mask,
@@ -355,6 +427,8 @@ class FunnelAeBaseModel(FunnelBaseModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+        print('RAN')
 
         kwargs = {}
         if output_attentions:
