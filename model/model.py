@@ -137,7 +137,6 @@ class FunnelAeEncoder(nn.Module):
         all_attentions = () if output_attentions else None
 
         for block_index, block in enumerate(self.blocks):
-            print(block_index)
             pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             pooling_flag = pooling_flag and block_index > 0
             if pooling_flag:
@@ -152,7 +151,6 @@ class FunnelAeEncoder(nn.Module):
                         key = value = hidden if self.config.pool_q_only else pooled_hidden
                     else:
                         query = key = value = hidden
-                    print('layer', value.shape)
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
                     all_attention_inputs[(block_index, layer_index)] = attention_inputs
                     hidden = layer_output[0]
@@ -194,16 +192,12 @@ class FunnelAeDecoder(nn.Module):
         output_hidden_states=False,
         return_dict=True,
     ):
-        print('')
         upsample_inds = []
         for i, hs in enumerate(encoder_hidden_states):
-            print(hs.shape)
             if i and hs.size(1) < encoder_hidden_states[i-1].size(1):
                 upsample_inds.append(
                     len(encoder_hidden_states) - i - 1
                 )
-        print(upsample_inds)
-        print('')
 
         # The pooling is not implemented on long tensors, so we convert this mask.
         attention_mask = attention_mask.type_as(last_hidden_state)
@@ -231,20 +225,7 @@ class FunnelAeDecoder(nn.Module):
                         key = value = upsampled_hidden
                     else:
                         query = key = value = hidden
-                    try:
-                        # TODO: needs to use all_attention_inputs[-1]
-                        print('layer', query.shape)
-                        layer_output = layer(query, key, value, all_attention_inputs[(len(self.blocks) - block_index - 1, layer_index)], output_attentions=output_attentions)
-                    except Exception:
-                        z = 1
-                        for i, at_in in enumerate(all_attention_inputs):
-                            try:
-                                print('run', i, 'shape', at_in[2].shape)
-                                layer(query, key, value, at_in, output_attentions=output_attentions)
-                                print('passed!')
-                            except Exception:
-                                pass
-                        breakpoint()
+                    layer_output = layer(query, key, value, all_attention_inputs[(len(self.blocks) - block_index - 1, layer_index)], output_attentions=output_attentions)
                     hidden = layer_output[0]
 
                     if output_attentions:
@@ -262,7 +243,7 @@ class FunnelModelOutput(ModelOutput):
     last_hidden_state:      List[Tuple[torch.tensor]] = None
     decoder_hidden_states:  List[Tuple[torch.tensor]] = None
     decoder_attentions:     List[Tuple[torch.tensor]] = None
-    encodeer_hidden_states: List[Tuple[torch.tensor]] = None
+    encoder_hidden_states: List[Tuple[torch.tensor]] = None
     encoder_attentions:     List[Tuple[torch.tensor]] = None
 
 
@@ -428,8 +409,6 @@ class FunnelAeBaseModel(FunnelBaseModel):
             return_dict=return_dict,
         )
 
-        print('RAN')
-
         kwargs = {}
         if output_attentions:
             kwargs['encoder_attentions'] = encoder_outputs[3]
@@ -438,7 +417,7 @@ class FunnelAeBaseModel(FunnelBaseModel):
         return FunnelModelOutput(
             last_hidden_state=decoder_outputs[0],
             decoder_hidden_states=decoder_outputs[1],
-            encodeer_hidden_states=hidden_states,
+            encoder_hidden_states=hidden_states,
             **kwargs
         )
 
