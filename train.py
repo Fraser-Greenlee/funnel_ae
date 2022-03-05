@@ -169,6 +169,11 @@ class DataTrainingArguments:
                     raise ValueError("`validation_file` should be a csv, a json or a txt file.")
 
 
+class DataCollatorForLanguageAutoencoding(DataCollatorForLanguageModeling):
+    def __post_init__(self):
+        self.mlm  = False
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -469,10 +474,8 @@ def main():
     # Data collator
     # This one will take care of randomly masking the tokens.
     # TODO: would be more efficient to just skip the masking code
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm_probability=0.0,
-        pad_to_multiple_of=data_args.pad_to_multiple_of,
+    data_collator = DataCollatorForLanguageAutoencoding(
+        tokenizer=tokenizer, pad_to_multiple_of=data_args.pad_to_multiple_of
     )
 
     # Initialize our Trainer
