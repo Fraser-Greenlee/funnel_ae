@@ -328,7 +328,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = FunnelAeForAutoencoding.from_config(config)
+        model = FunnelAeForAutoencoding(config)
 
     model.resize_token_embeddings(len(tokenizer))
 

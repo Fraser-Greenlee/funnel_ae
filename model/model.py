@@ -247,9 +247,10 @@ class FunnelModelOutput(ModelOutput):
     encoder_attentions:     List[Tuple[torch.tensor]] = None
 
 
-class FunnelAeBaseModel(FunnelBaseModel):
+class FunnelAePreTrainedModel(FunnelPreTrainedModel):
 
     config_class = FunnelAeConfig
+    base_model_prefix = "funnel_ae"
 
     def _init_weights(self, module):
         classname = module.__class__.__name__
@@ -274,6 +275,9 @@ class FunnelAeBaseModel(FunnelBaseModel):
             nn.init.normal_(module.word_embeddings.weight, std=std)
             if module.word_embeddings.padding_idx is not None:
                 module.word_embeddings.weight.data[module.word_embeddings.padding_idx].zero_()
+
+
+class FunnelAeBaseModel(FunnelBaseModel, FunnelAePreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
@@ -423,7 +427,7 @@ class FunnelAeBaseModel(FunnelBaseModel):
         )
 
 
-class FunnelAeForAutoencoding(FunnelPreTrainedModel):
+class FunnelAeForAutoencoding(FunnelAePreTrainedModel):
 
     config_class = FunnelAeConfig
     base_model_prefix = "funnel_ae"

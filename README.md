@@ -5,7 +5,8 @@ The Funnel Transformer converted into an Autoencoder.
 ## ToDo
 
 - [ ] Setup parameter sweep to see how well it can compress sentences.
-- - [ ] Make trainer script for autoencoding a text dataset.
+- - [x] Make trainer script for autoencoding a text dataset.
+- - [ ] Have pooling compress sequences to a single token.
 - - [ ] Run on wiki sentences with full ssequence accuracy in eval.
 - - [ ] Make collab notebook to trigger training with W&B logs.
 - - [ ] Get logs for many runs.

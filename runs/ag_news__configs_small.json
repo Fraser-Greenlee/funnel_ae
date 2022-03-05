@@ -1,0 +1,17 @@
+{
+    "pad_to_multiple_of": 2,
+    "dataset_name": "ag_news",
+    "max_seq_length": 32,
+    "config_name": "configs/small",
+    "tokenizer_name": "funnel-transformer/small",
+    "per_device_train_batch_size": 32,
+    "per_device_eval_batch_size": 64,
+
+    "run_name": "ag_news configs/small",
+
+    "output_dir": "outputs/test",
+    "overwrite_output_dir": true,
+    "do_train": true,
+    "do_eval": true,
+    "report_to": "wandb"
+}
