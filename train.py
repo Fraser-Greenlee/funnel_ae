@@ -14,10 +14,6 @@ from datasets import load_dataset, load_metric
 
 import transformers
 from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_MASKED_LM_MAPPING,
-    AutoConfig,
-    AutoModelForMaskedLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     HfArgumentParser,
@@ -40,8 +36,6 @@ check_min_version("4.17.0")
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
 
 logger = logging.getLogger(__name__)
-MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
-MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
 @dataclass
@@ -56,10 +50,6 @@ class ModelArguments:
             "help": "The model checkpoint for weights initialization."
             "Don't set if you want to train a model from scratch."
         },
-    )
-    model_type: Optional[str] = field(
-        default=None,
-        metadata={"help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
     )
     config_overrides: Optional[str] = field(
         default=None,
@@ -138,18 +128,15 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
-    mlm_probability: float = field(
-        default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
-    )
     line_by_line: bool = field(
         default=False,
         metadata={"help": "Whether distinct lines of text in the dataset are to be handled as distinct sequences."},
     )
-    pad_to_max_length: bool = field(
-        default=False,
+    pad_to_multiple_of: int = field(
+        default=None,
         metadata={
-            "help": "Whether to pad all samples to `max_seq_length`. "
-            "If False, will pad the samples dynamically when batching to the maximum length in the batch."
+            "help": "Whether to pad all samples to be a multiple of `pad_to_multiple_of`. "
+            "If None, will pad the samples dynamically when batching to the maximum length in the batch."
         },
     )
     max_train_samples: Optional[int] = field(
@@ -301,15 +288,12 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
-
-
-
     if model_args.config_name:
-        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
+        config = FunnelAeConfig.from_pretrained(model_args.config_name, **config_kwargs)
     elif model_args.model_name_or_path:
-        config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
+        config = FunnelAeConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
     else:
-        config = CONFIG_MAPPING[model_args.model_type]()
+        config = FunnelAeConfig()
         logger.warning("You are instantiating a new config instance from scratch.")
         if model_args.config_overrides is not None:
             logger.info(f"Overriding config: {model_args.config_overrides}")
@@ -333,7 +317,7 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        model = AutoModelForMaskedLM.from_pretrained(
+        model = FunnelAeForAutoencoding.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,
@@ -343,7 +327,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
+        model = FunnelAeForAutoencoding.from_config(config)
 
     model.resize_token_embeddings(len(tokenizer))
 
@@ -373,7 +357,6 @@ def main():
 
     if data_args.line_by_line:
         # When using line_by_line, we just tokenize each nonempty line.
-        padding = "max_length" if data_args.pad_to_max_length else False
 
         def tokenize_function(examples):
             # Remove empty lines
@@ -382,7 +365,6 @@ def main():
             ]
             return tokenizer(
                 examples[text_column_name],
-                padding=padding,
                 truncation=True,
                 max_length=max_seq_length,
                 # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
@@ -485,11 +467,11 @@ def main():
 
     # Data collator
     # This one will take care of randomly masking the tokens.
-    pad_to_multiple_of_8 = data_args.line_by_line and training_args.fp16 and not data_args.pad_to_max_length
+    # TODO: would be more efficient to just skip the masking code
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm_probability=data_args.mlm_probability,
-        pad_to_multiple_of=8 if pad_to_multiple_of_8 else None,
+        mlm_probability=0.0,
+        pad_to_multiple_of=data_args.pad_to_multiple_of,
     )
 
     # Initialize our Trainer
