@@ -2,3 +2,5 @@ wheel
 torch
 transformers
 datasets
+wandb
+sklearn
