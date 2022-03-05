@@ -9,6 +9,7 @@
 
     "run_name": "ag_news configs/small",
 
+    "logging_steps": 100,
     "output_dir": "outputs/test",
     "overwrite_output_dir": true,
     "do_train": true,
