@@ -1,3 +1,4 @@
 wheel
 torch
 transformers
+datasets
