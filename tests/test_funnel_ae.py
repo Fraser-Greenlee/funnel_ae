@@ -17,12 +17,11 @@
 import unittest
 import torch
 
-from transformers import FunnelTokenizer, is_torch_available
+from transformers import FunnelConfig, FunnelTokenizer, is_torch_available
 from transformers.models.auto import get_values
 from transformers.testing_utils import require_sentencepiece, require_tokenizers, require_torch, slow, torch_device
 
-from model.model import FunnelAeBaseModel, FunnelAeForAutoencoding
-from model.config import FunnelAeConfig
+from model.model import FunnelAeModel, FunnelAeForMaskedLM
 
 from transformers_copy.test_configuration_common import ConfigTester
 from transformers_copy.test_modeling_common import ModelTesterMixin, ids_tensor
@@ -88,7 +87,7 @@ class FunnelAeModelTester:
         self.hidden_size = self.d_model
         # Used in the tests to check the number of output hidden states/attentions
         self.num_hidden_layers = sum(self.block_sizes) + (0 if base else self.num_decoder_layers)
-        # FunnelAeBaseModel adds two hidden layers: input embeddings and the sum of the upsampled encoder hidden state with
+        # FunnelAeModel adds two hidden layers: input embeddings and the sum of the upsampled encoder hidden state with
         # the last hidden state of the first block (which is the first hidden state of the decoder).
         if not base:
             self.expected_num_hidden_layers = self.num_hidden_layers + 2
@@ -127,7 +126,7 @@ class FunnelAeModelTester:
         )
 
     def get_config(self):
-        return FunnelAeConfig(
+        return FunnelConfig(
             vocab_size=self.vocab_size,
             block_sizes=self.block_sizes,
             num_decoder_layers=self.num_decoder_layers,
@@ -154,7 +153,7 @@ class FunnelAeModelTester:
         choice_labels,
         fake_token_labels,
     ):
-        model = FunnelAeBaseModel(config=config)
+        model = FunnelAeModel(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
@@ -181,7 +180,7 @@ class FunnelAeModelTester:
         choice_labels,
         fake_token_labels,
     ):
-        model = FunnelAeBaseModel(config=config)
+        model = FunnelAeModel(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
@@ -208,7 +207,7 @@ class FunnelAeModelTester:
         choice_labels,
         fake_token_labels,
     ):
-        model = FunnelAeForAutoencoding(config=config)
+        model = FunnelAeForMaskedLM(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=token_labels)
@@ -236,8 +235,8 @@ class FunnelAeModelTest(ModelTesterMixin, unittest.TestCase):
     test_pruning = False
     all_model_classes = (
         (
-            FunnelAeBaseModel,
-            FunnelAeForAutoencoding,
+            FunnelAeModel,
+            FunnelAeForMaskedLM,
         )
         if is_torch_available()
         else ()
@@ -245,7 +244,7 @@ class FunnelAeModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = FunnelAeModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=FunnelAeConfig)
+        self.config_tester = ConfigTester(self, config_class=FunnelConfig)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -288,12 +287,12 @@ class FunnelBaseModelTest(ModelTesterMixin, unittest.TestCase):
     test_head_masking = False
     test_pruning = False
     all_model_classes = (
-        (FunnelAeBaseModel, FunnelAeForAutoencoding) if is_torch_available() else ()
+        (FunnelAeModel, FunnelAeForMaskedLM) if is_torch_available() else ()
     )
 
     def setUp(self):
         self.model_tester = FunnelAeModelTester(self, base=True)
-        self.config_tester = ConfigTester(self, config_class=FunnelAeConfig)
+        self.config_tester = ConfigTester(self, config_class=FunnelConfig)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -316,7 +315,7 @@ class FunnelBaseModelTest(ModelTesterMixin, unittest.TestCase):
         config.return_dict = True
 
         for model_class in self.all_model_classes:
-            if model_class.__name__ == "FunnelAeBaseModel":
+            if model_class.__name__ == "FunnelAeModel":
                 continue
             model = model_class(config)
             model.to(torch_device)
@@ -352,7 +351,7 @@ class FunnelAeModelIntegrationTest(unittest.TestCase):
         lengths = [0, 1, 2, 3, 4, 5, 6, 4, 1, 3, 5, 0, 1]
         token_type_ids = torch.tensor([[2] + [0] * a + [1] * (sequence_length - a - 1) for a in lengths])
 
-        model = FunnelAeBaseModel.from_pretrained("sgugger/funnel-random-tiny")
+        model = FunnelAeModel.from_pretrained("sgugger/funnel-random-tiny")
         output = model(input_ids, token_type_ids=token_type_ids)[0].abs()
 
         expected_output_sum = torch.tensor(2344.8352)
@@ -371,7 +370,7 @@ class FunnelAeModelIntegrationTest(unittest.TestCase):
     @slow
     def test_inference_model(self):
         tokenizer = FunnelTokenizer.from_pretrained("huggingface/funnel-small")
-        model = FunnelAeBaseModel.from_pretrained("huggingface/funnel-small")
+        model = FunnelAeModel.from_pretrained("huggingface/funnel-small")
         inputs = tokenizer("Hello! I am the Funnel Transformer model.", return_tensors="pt")
         output = model(**inputs)[0]
 
