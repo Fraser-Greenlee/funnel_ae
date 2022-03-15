@@ -1,46 +1,78 @@
+from typing import Dict
 import torch
-from torch.nn import functional as F
-from transformers.trainer import Trainer
+from dataclasses import dataclass, field
+from transformers.trainer import Trainer, is_torch_tpu_available
+from transformers.training_args import TrainingArguments
 
+
+@dataclass
+class AeTrainingArguments(TrainingArguments):
+    use_skip_con: bool = field(default=True,  metadata={"help": "Use skip connection weights."})
+    skip_conn_schedule_k: float = field(default=0.0014,   metadata={"help": "Multiplied by global_step in a sigmoid, more gradually increase regulariser loss weight."})
+    skip_conn_schedule_b: float = field(default=3,     metadata={"help": "Added to global step in sigmoid, further delays increase in regulariser loss weight."})
+    skip_conn_schedule_b_offsets: str = field(default="", metadata={"help": "Delays reduction of early skip layers."})
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.skip_conn_schedule_b_offsets = [
+            float(v) for v in self.skip_conn_schedule_b_offsets.split()
+        ]
 
 class AeTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.n_pools = len(self.model.config.block_sizes)
+        if self.args.skip_conn_schedule_b_offsets:
+            assert len(self.model.config.block_sizes) == len(self.args.skip_conn_schedule_b_offsets)
+        else:
+            self.args.skip_conn_schedule_b_offsets *= len(self.model.config.block_sizes)
+        self.skip_conn_schedule_b_offsets = torch.tensor(self.args.skip_conn_schedule_b_offsets, requires_grad=False)
 
-    def skip_connection_weights(self):
-        if self.state.global_step is None:
-            return 0
-
-        base_weight = self.state.global_step * self.args.skip_conn_schedule_k - self.args.skip_conn_schedule_b
-        skip_conn_offsets = torch.arange(0, self.self.n_pools) * self.args.skip_conn_schedule_b_offset
-
-        return torch.sigmoid(base_weight - skip_conn_offsets).item()
+    def _skip_connection_weights(self):
+        return torch.sigmoid(
+            self.state.global_step * self.args.skip_conn_schedule_k
+            - self.args.skip_conn_schedule_b
+            -  self.skip_conn_schedule_b_offsets
+        ).tolist()
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        if self.label_smoother is not None and "labels" in inputs:
-            labels = inputs.pop("labels")
-        else:
-            labels = None
+        if self.args.use_skip_con and self.state.global_step:
+            model.funnel.decoder.skip_w = self._skip_connection_weights()
+        return super().compute_loss(model, inputs, return_outputs=return_outputs)
 
-        model.skip_connection_wieghts = self.skip_connection_weights()
-        outputs = model(**inputs)
+    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
+        '''
+            Adds logging `skip_con_{i}`
+        '''
+        if self.control.should_log:
+            if is_torch_tpu_available():
+                raise NotImplementedError()
 
-        # Save past state if it exists
-        if self.args.past_index >= 0:
-            self._past = outputs[self.args.past_index]
+            logs: Dict[str, float] = {}
 
-        if labels is not None:
-            loss = self.label_smoother(outputs, labels)
-        else:
-            # We don't use .loss here since the model may return tuples instead of ModelOutput.
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+            # all_gather + mean() to get average loss over all processes
+            tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
 
-        if not self.args.no_reg_loss:
-            reg_loss = self.reg_loss(outputs.latent)
-            loss += self.reg_weight() * reg_loss
+            # reset tr_loss to zero
+            tr_loss -= tr_loss
 
-        if self.args.recon_loss:
-            loss += F.mse_loss(outputs["reconstructed_encoding"], outputs["encoder_last_hidden_state"])
+            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            logs["learning_rate"] = self._get_learning_rate()
 
-        return (loss, outputs) if return_outputs else loss
+            if self.args.use_skip_con:
+                for i, weight in enumerate(model.funnel.decoder.skip_w):
+                    logs[f"skip_con_{i}"] = weight
+
+            self._total_loss_scalar += tr_loss_scalar
+            self._globalstep_last_logged = self.state.global_step
+            self.store_flos()
+
+            self.log(logs)
+
+        metrics = None
+        if self.control.should_evaluate:
+            metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
+            self._report_to_hp_search(trial, epoch, metrics)
+
+        if self.control.should_save:
+            self._save_checkpoint(model, trial, metrics=metrics)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
