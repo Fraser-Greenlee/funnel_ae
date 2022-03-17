@@ -44,10 +44,6 @@ class FunnelAePreTrainedModel(FunnelPreTrainedModel):
 
 class FunnelRelMultiheadAttentionDecoder(FunnelRelMultiheadAttention):
 
-    def __init__(self, config, block_index):
-        super().__init__(config, block_index)
-        self.block_index = len(self.config.block_sizes) - block_index - 1
-
     def forward(self, query, key, value, attention_inputs, output_attentions=False):
         # TODO: ensure this actually makes sense
 
@@ -108,23 +104,27 @@ class FunnelAeDecoder(nn.Module):
         super().__init__()
         self.config = config
         self.attention_structure = FunnelAttentionStructure(config)
-        config.decoder_block_sizes = config.block_sizes[::-1]
         self.blocks = nn.ModuleList(
             [
                 nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
-                for block_index, block_size in enumerate(config.decoder_block_sizes)
+                for block_index, block_size in enumerate(config.block_sizes)
             ]
         )
-        self.skip_w = [0 for _ in config.decoder_block_sizes]
+        self.skip_w = [0 for _ in config.block_sizes]
 
-    def upsample_hidden(self, hidden):
-        # make new tokens by averaging adjacent
+    @staticmethod
+    def avg_hidden(hidden1, hidden2):
+        interpolated_hidden = torch.mean(torch.stack([hidden1, hidden2], axis=1), axis=1)
+        return interpolated_hidden
+
+    def _upsample_hidden(self, hidden):
+        # make new tokens by averaging their adjacents
         seq_len = hidden.size(1)
         token_ids = list(range(seq_len))
         shifted_token_ids = [token_ids[-1]] + token_ids[:-1]
         shifted_hidden = hidden[:,shifted_token_ids,:]
         # average these to get new tokens
-        interpolated_hidden = torch.mean(torch.stack([hidden, shifted_hidden], axis=1), axis=1)
+        interpolated_hidden = self.avg_hidden(hidden, shifted_hidden)
         cat_hidden = torch.cat((hidden, interpolated_hidden), axis=1)
         # shuffle so new hidden tokens are avg of adjacent
         mixed_ids = []
@@ -132,6 +132,28 @@ class FunnelAeDecoder(nn.Module):
             mixed_ids += [i, i + seq_len]
         final_hidden = cat_hidden[:,mixed_ids,:]
         return final_hidden
+
+    def upsample_hidden(self, hidden, target_len):
+
+        if self.config.separate_cls:
+            cls_token = hidden[:,:1,:]
+            doubled_hidden = self._upsample_hidden(hidden[:,1:,:])
+
+            end_token = []
+            if doubled_hidden.size(1) + 1 == target_len - 1:
+                cls_w_last = self.avg_hidden(cls_token, doubled_hidden[:,-1:,:])
+                end_token = [cls_w_last]
+
+            doubled_hidden = torch.cat([cls_token, doubled_hidden] + end_token, axis=1)
+
+        else:
+            doubled_hidden = self._upsample_hidden(hidden)
+
+        # for odd number of target tokens, prune the interpolated token at the end
+        if doubled_hidden.size(1) > target_len:
+            doubled_hidden = doubled_hidden[:,:-1,:]
+
+        return doubled_hidden
 
     def forward(
         self,
@@ -173,15 +195,17 @@ class FunnelAeDecoder(nn.Module):
         all_attentions = () if output_attentions else None
 
         # run the decoder
-        for block_index, block in enumerate(self.blocks):
-            inv_block_index = len(self.blocks) - block_index - 1
-            hidden = hidden * (1 - self.skip_w[block_index]) + self.skip_w[block_index] * block_hiddens[inv_block_index]
+        for block_index, block in list(enumerate(self.blocks))[::-1]:
+            hidden = hidden * (1 - self.skip_w[block_index]) + self.skip_w[block_index] * block_hiddens[block_index]
             upsampling_flag = hidden.size(1) < block_hiddens[0].size(1)
-            upsampling_flag = upsampling_flag and block_index < len(self.blocks) - 1
+            upsampling_flag = upsampling_flag and block_index > 0
             if upsampling_flag:
-                upsampled_hidden = self.upsample_hidden(hidden)
-            for (layer_index, layer) in enumerate(block):
-                for repeat_index in range(self.config.block_repeats[block_index]):
+                target_size = block_hiddens[block_index-1].size(1)
+                upsampled_hidden = self.upsample_hidden(hidden, target_size)
+                if block_hiddens[block_index-1].size(1) != upsampled_hidden.size(1):
+                    z = 1
+            for (layer_index, layer) in list(enumerate(block))[::-1]:
+                for repeat_index in range(self.config.block_repeats[block_index])[::-1]:
                     do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
                     if do_upsampling:
                         query = upsampled_hidden
@@ -189,7 +213,8 @@ class FunnelAeDecoder(nn.Module):
                     else:
                         query = key = value = hidden
                     # TODO attention inputs don't work for 2nd layer call, cls_mask is 1/2 expected size
-                    layer_output = layer(query, key, value, all_attention_inputs[inv_block_index, layer_index, repeat_index], output_attentions=output_attentions)
+                    print(query.shape, key.shape)
+                    layer_output = layer(query, key, value, all_attention_inputs[block_index, layer_index, repeat_index], output_attentions=output_attentions)
                     hidden = layer_output[0]
 
                     if output_attentions:
@@ -236,6 +261,30 @@ class FunnelAeModel(FunnelAePreTrainedModel):
             output_hidden_states=True,
             return_dict=return_dict,
         )
+    
+        # Copy Input handling from `FunnelBaseModel`
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        elif input_ids is not None:
+            input_shape = input_ids.size()
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        if attention_mask is None:
+            attention_mask = torch.ones(input_shape, device=device)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+        #
 
         decoder_outputs = self.decoder(
             final_hidden=encoder_outputs[0],
