@@ -66,8 +66,8 @@ class FunnelRelMultiheadAttentionDecoder(FunnelRelMultiheadAttention):
         r_w_bias = self.r_w_bias * self.scale
         # Shapes batch_size x n_head x seq_len x context_len
         content_score = torch.einsum("bind,bjnd->bnij", q_head + r_w_bias, k_head)
-        positional_attn = self.relative_positional_attention(position_embeds, q_head, context_len, cls_mask.T)
-        token_type_attn = self.relative_token_type_attention(token_type_mat.permute(0,2,1), q_head, cls_mask.T)
+        positional_attn = self.relative_positional_attention(position_embeds, q_head,  context_len, None if cls_mask is None else cls_mask.T)
+        token_type_attn = self.relative_token_type_attention(token_type_mat.permute(0,2,1), q_head, None if cls_mask is None else cls_mask.T)
 
         # merge attention scores
         attn_score = content_score + positional_attn + token_type_attn
