@@ -212,8 +212,6 @@ class FunnelAeDecoder(nn.Module):
                         key = value = hidden if self.config.pool_q_only else upsampled_hidden
                     else:
                         query = key = value = hidden
-                    # TODO attention inputs don't work for 2nd layer call, cls_mask is 1/2 expected size
-                    print(query.shape, key.shape)
                     layer_output = layer(query, key, value, all_attention_inputs[block_index, layer_index, repeat_index], output_attentions=output_attentions)
                     hidden = layer_output[0]
 
