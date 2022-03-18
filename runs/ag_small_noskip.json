@@ -9,7 +9,7 @@
 
     "use_skip_con": false,
 
-    "run_name": "ag_news no_skip configs/small",
+    "run_name": "ag no_skip configs/small",
 
     "logging_steps": 100,
     "output_dir": "outputs/test",

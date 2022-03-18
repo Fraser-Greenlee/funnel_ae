@@ -10,7 +10,7 @@
 
     "dataset_name": "ag_news",
 
-    "run_name": "ag_news configs/small skip",
+    "run_name": "ag small skip",
 
     "do_train": true,
     "do_eval": false,

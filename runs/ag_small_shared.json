@@ -7,7 +7,7 @@
     "per_device_train_batch_size": 64,
     "per_device_eval_batch_size": 128,
 
-    "run_name": "ag_news configs/small_shared",
+    "run_name": "ag small_shared",
 
     "logging_steps": 100,
     "output_dir": "outputs/test",
