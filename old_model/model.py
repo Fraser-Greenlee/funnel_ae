@@ -26,6 +26,7 @@ class FunnelUpsamplingAttentionStructure(FunnelAttentionStructure):
         Upsamples tokens by interpolating between adjacent tokens to create new ones.
     '''
     def get_full_seq_len(self, cmp_size):
+        raise NotImplemented()
         cmp_size -= 1 if self.config.separate_cls else 0
         if cmp_size <= 0:
             raise Exception('Not enough latent tokens.')
@@ -35,12 +36,14 @@ class FunnelUpsamplingAttentionStructure(FunnelAttentionStructure):
         return decomp_size
 
     def pool_seq_len(self, seq_len):
+        raise NotImplemented()
         seq_len -= 1 if self.config.separate_cls else 0
         seq_len //= 2
         seq_len += 1 if self.config.separate_cls else 0
         return seq_len
 
     def pre_attention_pooling(self, attention_inputs):
+        raise NotImplemented()
         # modified to not use `output`
         """Pool the proper parts of `attention_inputs` before the attention layer."""
         position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
