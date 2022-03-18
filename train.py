@@ -25,7 +25,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 from train.trainer import AeTrainer, AeTrainingArguments
-from model.model import FunnelAeForAutoencoding
+from model.model import FunnelAeForMaskedLM
 from model.config import FunnelAeConfig
 
 
@@ -321,7 +321,7 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        model = FunnelAeForAutoencoding.from_pretrained(
+        model = FunnelAeForMaskedLM.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,
@@ -331,7 +331,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = FunnelAeForAutoencoding(config)
+        model = FunnelAeForMaskedLM(config)
 
     model.resize_token_embeddings(len(tokenizer))
 

@@ -236,6 +236,12 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def get_input_embeddings(self):
+        return self.embeddings.word_embeddings
+
+    def set_input_embeddings(self, new_embeddings):
+        self.embeddings.word_embeddings = new_embeddings
+
     def forward(
         self,
         input_ids=None,
@@ -322,7 +328,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
 
 class FunnelAeForMaskedLM(FunnelForMaskedLM):
     def __init__(self, config):
-        super(FunnelForMaskedLM).__init__(config)
+        super(FunnelForMaskedLM, self).__init__(config)
 
         self.funnel = FunnelAeModel(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
