@@ -18,11 +18,12 @@ import unittest
 import numpy as np
 import torch
 
-from transformers import FunnelConfig, FunnelTokenizer, is_torch_available
+from transformers import FunnelTokenizer, is_torch_available
 from transformers.models.auto import get_values
 from transformers.testing_utils import require_sentencepiece, require_tokenizers, require_torch, slow, torch_device
 
 from model.model import FunnelAeModel, FunnelAeForMaskedLM
+from model.config import FunnelAeConfig
 
 from transformers_copy.test_configuration_common import ConfigTester
 from transformers_copy.test_modeling_common import ModelTesterMixin, ids_tensor
@@ -127,7 +128,7 @@ class FunnelAeModelTester:
         )
 
     def get_config(self):
-        return FunnelConfig(
+        return FunnelAeConfig(
             vocab_size=self.vocab_size,
             block_sizes=self.block_sizes,
             num_decoder_layers=self.num_decoder_layers,
@@ -243,7 +244,7 @@ class FunnelAeModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = FunnelAeModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=FunnelConfig)
+        self.config_tester = ConfigTester(self, config_class=FunnelAeConfig)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -291,13 +292,18 @@ class FunnelBaseModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = FunnelAeModelTester(self, base=True)
-        self.config_tester = ConfigTester(self, config_class=FunnelConfig)
+        self.config_tester = ConfigTester(self, config_class=FunnelAeConfig)
 
     def test_config(self):
         self.config_tester.run_common_tests()
 
     def test_base_model(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_base_model(*config_and_inputs)
+
+    def test_base_model_share_encoder_blocks(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        config_and_inputs[0].share_encoder_blocks = True
         self.model_tester.create_and_check_base_model(*config_and_inputs)
 
     def test_for_sequence_classification(self):
