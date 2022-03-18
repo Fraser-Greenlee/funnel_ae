@@ -100,16 +100,19 @@ class FunnelLayer(FunnelLayer):
 
 
 class FunnelAeDecoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, encoder_blocks=None):
         super().__init__()
         self.config = config
         self.attention_structure = FunnelAttentionStructure(config)
-        self.blocks = nn.ModuleList(
-            [
-                nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
-                for block_index, block_size in enumerate(config.block_sizes)
-            ]
-        )
+        if encoder_blocks is not None:
+            self.blocks = encoder_blocks
+        else:
+            self.blocks = nn.ModuleList(
+                [
+                    nn.ModuleList([FunnelLayer(config, block_index) for _ in range(block_size)])
+                    for block_index, block_size in enumerate(config.block_sizes)
+                ]
+            )
         self.skip_w = [0 for _ in config.block_sizes]
 
     @staticmethod
@@ -231,7 +234,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         self.config = config
         self.base_funnel = FunnelBaseModel(config)
         self.embeddings = self.base_funnel.embeddings
-        self.decoder = FunnelAeDecoder(config)
+        self.decoder = FunnelAeDecoder(config, encoder_blocks=self.base_funnel.encoder.blocks if config.share_encoder_blocks else None)
 
         # Initialize weights and apply final processing
         self.post_init()

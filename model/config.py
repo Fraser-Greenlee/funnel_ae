@@ -26,7 +26,10 @@ class FunnelAeConfig(FunnelConfig):
         separate_cls=True,
         truncate_seq=True,
         pool_q_only=True,
+        # new
+        share_encoder_blocks=False,
         **kwargs
     ):
+        self.share_encoder_blocks = share_encoder_blocks
         super().__init__(vocab_size, block_sizes, block_repeats, num_decoder_layers, d_model, n_head, d_head, d_inner, hidden_act, hidden_dropout, attention_dropout, activation_dropout, max_position_embeddings, type_vocab_size, initializer_range, initializer_std, layer_norm_eps, pooling_type, attention_type, separate_cls, truncate_seq, pool_q_only, **kwargs)
         self.num_decoder_layers = None
