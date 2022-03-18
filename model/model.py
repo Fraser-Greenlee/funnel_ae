@@ -42,63 +42,6 @@ class FunnelAePreTrainedModel(FunnelPreTrainedModel):
                 module.word_embeddings.weight.data[module.word_embeddings.padding_idx].zero_()
 
 
-class FunnelRelMultiheadAttentionDecoder(FunnelRelMultiheadAttention):
-
-    def forward(self, query, key, value, attention_inputs, output_attentions=False):
-        # TODO: ensure this actually makes sense
-
-        # query has shape batch_size x seq_len x d_model
-        # key and value have shapes batch_size x context_len x d_model
-        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
-
-        batch_size, seq_len, _ = query.shape
-        context_len = key.shape[1]
-        n_head, d_head = self.config.n_head, self.config.d_head
-
-        # Shape batch_size x seq_len x n_head x d_head
-        q_head = self.q_head(query).view(batch_size, seq_len, n_head, d_head)
-        # Shapes batch_size x context_len x n_head x d_head
-        k_head = self.k_head(key).view(batch_size, context_len, n_head, d_head)
-        v_head = self.v_head(value).view(batch_size, context_len, n_head, d_head)
-
-        q_head = q_head * self.scale
-        # Shape n_head x d_head
-        r_w_bias = self.r_w_bias * self.scale
-        # Shapes batch_size x n_head x seq_len x context_len
-        content_score = torch.einsum("bind,bjnd->bnij", q_head + r_w_bias, k_head)
-        positional_attn = self.relative_positional_attention(position_embeds, q_head,  context_len, None if cls_mask is None else cls_mask.T)
-        token_type_attn = self.relative_token_type_attention(token_type_mat.permute(0,2,1), q_head, None if cls_mask is None else cls_mask.T)
-
-        # merge attention scores
-        attn_score = content_score + positional_attn + token_type_attn
-
-        # precision safe in case of mixed precision training
-        dtype = attn_score.dtype
-        attn_score = attn_score.float()
-        # perform masking
-        if attention_mask is not None:
-            attn_score = attn_score - INF * (1 - attention_mask[:, None, :, None].float())
-        # attention probability
-        attn_prob = torch.softmax(attn_score, dim=-1, dtype=dtype)
-        attn_prob = self.attention_dropout(attn_prob)
-
-        # attention output, shape batch_size x seq_len x n_head x d_head
-        attn_vec = torch.einsum("bnij,bjnd->bind", attn_prob, v_head)
-
-        # Shape shape batch_size x seq_len x d_model
-        attn_out = self.post_proj(attn_vec.reshape(batch_size, seq_len, n_head * d_head))
-        attn_out = self.hidden_dropout(attn_out)
-
-        output = self.layer_norm(query + attn_out)
-        return (output, attn_prob) if output_attentions else (output,)
-
-
-class FunnelLayer(FunnelLayer):
-    def __init__(self, config, block_index):
-        super().__init__(config, block_index)
-        self.attention = FunnelRelMultiheadAttentionDecoder(config, block_index)
-
-
 class FunnelAeDecoder(nn.Module):
     def __init__(self, config, encoder_blocks=None):
         super().__init__()
@@ -196,6 +139,7 @@ class FunnelAeDecoder(nn.Module):
         hidden = final_hidden
         all_hidden_states = (hidden,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
+        last_attention_mask = None
 
         # run the decoder
         for block_index, block in list(enumerate(self.blocks))[::-1]:
@@ -205,8 +149,6 @@ class FunnelAeDecoder(nn.Module):
             if upsampling_flag:
                 target_size = block_hiddens[block_index-1].size(1)
                 upsampled_hidden = self.upsample_hidden(hidden, target_size)
-                if block_hiddens[block_index-1].size(1) != upsampled_hidden.size(1):
-                    z = 1
             for (layer_index, layer) in list(enumerate(block))[::-1]:
                 for repeat_index in range(self.config.block_repeats[block_index])[::-1]:
                     do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
@@ -215,7 +157,23 @@ class FunnelAeDecoder(nn.Module):
                         key = value = hidden if self.config.pool_q_only else upsampled_hidden
                     else:
                         query = key = value = hidden
-                    layer_output = layer(query, key, value, all_attention_inputs[block_index, layer_index, repeat_index], output_attentions=output_attentions)
+
+                    position_embeds, token_type_mat, attention_mask, cls_mask = all_attention_inputs[block_index, layer_index, repeat_index]
+
+                    cls_mask = None if cls_mask is None else cls_mask.T
+                    token_type_mat = token_type_mat.permute(0,2,1)
+
+                    if query.shape[1] > key.shape[1]:
+                        # if doing query only upsampling, use the previous 1/2 len attention mask
+                        hold = attention_mask
+                        attention_mask = last_attention_mask
+                        last_attention_mask = hold
+                    else:
+                        last_attention_mask = attention_mask
+
+                    attention_inputs = position_embeds, token_type_mat, attention_mask, cls_mask
+
+                    layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
                     hidden = layer_output[0]
 
                     if output_attentions:
