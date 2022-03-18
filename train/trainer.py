@@ -24,7 +24,7 @@ class AeTrainer(Trainer):
         if self.args.skip_conn_schedule_b_offsets:
             assert len(self.model.config.block_sizes) == len(self.args.skip_conn_schedule_b_offsets)
         else:
-            self.args.skip_conn_schedule_b_offsets *= len(self.model.config.block_sizes)
+            self.args.skip_conn_schedule_b_offsets = [0 for _ in self.model.config.block_sizes]
         self.skip_conn_schedule_b_offsets = torch.tensor(self.args.skip_conn_schedule_b_offsets, requires_grad=False)
 
     def _skip_connection_weights(self):
