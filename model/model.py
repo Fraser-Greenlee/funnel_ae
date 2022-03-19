@@ -250,7 +250,6 @@ class FunnelAeModel(FunnelAePreTrainedModel):
             attention_mask = torch.ones(input_shape, device=device)
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
-        #
 
         decoder_outputs = self.decoder(
             final_hidden=encoder_outputs[0],
