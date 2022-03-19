@@ -64,6 +64,7 @@ class FunnelAeDecoder(nn.Module):
         return interpolated_hidden
 
     def _upsample_hidden(self, hidden):
+        # TODO allow upsample via FFN
         # make new tokens by averaging their adjacents
         seq_len = hidden.size(1)
         token_ids = list(range(seq_len))
