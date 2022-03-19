@@ -9,7 +9,7 @@
 
     "use_skip_con": false,
 
-    "run_name": "ag 8tkn no_skip randm enc",
+    "run_name": "ag 8tkn no_skip randn enc",
 
     "logging_steps": 100,
     "eval_steps": 1000,
