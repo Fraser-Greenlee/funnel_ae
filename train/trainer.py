@@ -1,7 +1,8 @@
 from typing import Dict
 import torch
+from torch import nn
 from dataclasses import dataclass, field
-from transformers.trainer import Trainer, is_torch_tpu_available
+from transformers.trainer import Trainer, is_torch_tpu_available, get_parameter_names, ShardedDDPOption, is_sagemaker_mp_enabled
 from transformers.training_args import TrainingArguments
 
 
@@ -11,6 +12,7 @@ class AeTrainingArguments(TrainingArguments):
     skip_conn_schedule_k: float = field(default=0.0014,   metadata={"help": "Multiplied by global_step in a sigmoid, more gradually increase regulariser loss weight."})
     skip_conn_schedule_b: float = field(default=3,     metadata={"help": "Added to global step in sigmoid, further delays increase in regulariser loss weight."})
     skip_conn_schedule_b_offsets: str = field(default="", metadata={"help": "Delays reduction of early skip layers."})
+    dont_train_encoder: bool = field(default=False, metadata={"help": "Don't optimize encoder parameters."})
 
     def __post_init__(self):
         super().__post_init__()
@@ -76,3 +78,42 @@ class AeTrainer(Trainer):
         if self.control.should_save:
             self._save_checkpoint(model, trial, metrics=metrics)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+
+    def create_optimizer(self):
+        """
+        Setup the optimizer.
+
+        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
+        Trainer's init through `optimizers`, or subclass and override this method in a subclass.
+        """
+        if self.optimizer is None:
+            decay_parameters = get_parameter_names(self.model, [nn.LayerNorm])
+            decay_parameters = [name for name in decay_parameters if "bias" not in name]
+
+            # allow not training encoder
+            model_parameters = [(n, p) for n,p in self.model.named_parameters()]
+            if self.args.dont_train_encoder:
+                model_parameters = [(n, p) for n,p in model_parameters if 'encoder' not in n]
+
+            optimizer_grouped_parameters = [
+                {
+                    "params": [p for n, p in model_parameters if n in decay_parameters],
+                    "weight_decay": self.args.weight_decay,
+                },
+                {
+                    "params": [p for n, p in model_parameters if n not in decay_parameters],
+                    "weight_decay": 0.0,
+                },
+            ]
+
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+
+            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+                raise NotImplementedError()
+            else:
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+        if is_sagemaker_mp_enabled():
+            raise NotImplementedError()
+
+        return self.optimizer
