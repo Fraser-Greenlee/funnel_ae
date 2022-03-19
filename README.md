@@ -25,6 +25,8 @@ The Funnel Transformer converted into an Autoencoder.
 
 - [ ] Checkout papers that worked on similar.
 - - [ ] NVAE (I'm doing similar but for text)
+- - [ ] Std Autoencoder Skip connections
+- - [ ] Std large Autoencoders
 - - [ ] Anything doing upsampling & refining encodings.
 
 - [ ] Run basic check runs.
