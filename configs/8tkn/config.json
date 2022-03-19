@@ -1,0 +1,36 @@
+{
+    "activation_dropout": 0.0,
+    "architectures": [
+        "FunnelModel"
+    ],
+    "attention_dropout": 0.1,
+    "attention_type": "relative_shift",
+    "block_repeats": [
+        1,
+        1,
+        1
+    ],
+    "block_sizes": [
+        4,
+        4,
+        4
+    ],
+    "d_head": 64,
+    "d_inner": 3072,
+    "d_model": 768,
+    "hidden_act": "gelu_new",
+    "hidden_dropout": 0.1,
+    "initializer_range": 0.1,
+    "initializer_std": null,
+    "layer_norm_eps": 1e-09,
+    "max_position_embeddings": 512,
+    "model_type": "funnel",
+    "n_head": 12,
+    "pool_q_only": true,
+    "pooling_type": "mean",
+    "rel_attention_type": "factorized",
+    "separate_cls": false,
+    "truncate_seq": true,
+    "type_vocab_size": 3,
+    "vocab_size": 30522
+}
