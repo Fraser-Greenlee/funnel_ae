@@ -18,5 +18,7 @@
     "do_train": true,
     "report_to": "wandb",
     "overwrite_output_dir": true,
-    "output_dir": "outputs/test"
+    "output_dir": "outputs/test",
+    "save_strategy": "no",
+    "save_total_limit": 3
 }
