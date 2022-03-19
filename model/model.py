@@ -1,9 +1,10 @@
+import copy
 import numpy as np
 import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.funnel.modeling_funnel import (
-    FunnelLayer, FunnelAttentionStructure, FunnelRelMultiheadAttention, _relative_shift_gather
+    FunnelLayer, FunnelAttentionStructure, FunnelPositionwiseFFN
 )
 from transformers import (
     FunnelBaseModel,
@@ -45,7 +46,9 @@ class FunnelAePreTrainedModel(FunnelPreTrainedModel):
 class FunnelAeDecoder(nn.Module):
     def __init__(self, config, encoder_blocks=None):
         super().__init__()
+        config = copy.deepcopy(config)
         self.config = config
+        config.pool_q_only = config.upsample_q_only
         self.attention_structure = FunnelAttentionStructure(config)
         if encoder_blocks is not None:
             self.blocks = encoder_blocks
@@ -56,6 +59,10 @@ class FunnelAeDecoder(nn.Module):
                     for block_index, block_size in enumerate(config.block_sizes)
                 ]
             )
+        if config.upsample_mode == "ff_seperator":
+            self.seperators = nn.ModuleList([
+                FunnelPositionwiseFFN(config) for _ in config.block_sizes
+            ])
         self.skip_w = [0 for _ in config.block_sizes]
 
     @staticmethod
@@ -63,28 +70,33 @@ class FunnelAeDecoder(nn.Module):
         interpolated_hidden = torch.mean(torch.stack([hidden1, hidden2], axis=1), axis=1)
         return interpolated_hidden
 
-    def _upsample_hidden(self, hidden):
-        # TODO allow upsample via FFN
-        # make new tokens by averaging their adjacents
-        seq_len = hidden.size(1)
-        token_ids = list(range(seq_len))
-        shifted_token_ids = [token_ids[-1]] + token_ids[:-1]
-        shifted_hidden = hidden[:,shifted_token_ids,:]
-        # average these to get new tokens
-        interpolated_hidden = self.avg_hidden(hidden, shifted_hidden)
-        cat_hidden = torch.cat((hidden, interpolated_hidden), axis=1)
+    def _upsample_hidden(self, hidden, block_index):
+        if self.config.upsample_mode == "ff_seperator":
+            seperators = self.seperators[block_index](hidden)
+            cat_hidden = torch.cat((hidden - seperators, hidden + seperators), axis=1)
+        else:
+            # make new tokens by averaging their adjacents
+            seq_len = hidden.size(1)
+            token_ids = list(range(seq_len))
+            shifted_token_ids = [token_ids[-1]] + token_ids[:-1]
+            shifted_hidden = hidden[:,shifted_token_ids,:]
+            # average these to get new tokens
+            interpolated_hidden = self.avg_hidden(hidden, shifted_hidden)
+            cat_hidden = torch.cat((hidden, interpolated_hidden), axis=1)
+
         # shuffle so new hidden tokens are avg of adjacent
         mixed_ids = []
         for i in range(seq_len):
             mixed_ids += [i, i + seq_len]
         final_hidden = cat_hidden[:,mixed_ids,:]
+
         return final_hidden
 
-    def upsample_hidden(self, hidden, target_len):
+    def upsample_hidden(self, hidden, target_len, block_index):
 
         if self.config.separate_cls:
             cls_token = hidden[:,:1,:]
-            doubled_hidden = self._upsample_hidden(hidden[:,1:,:])
+            doubled_hidden = self._upsample_hidden(hidden[:,1:,:], block_index)
 
             end_token = []
             if doubled_hidden.size(1) + 1 == target_len - 1:
@@ -94,7 +106,7 @@ class FunnelAeDecoder(nn.Module):
             doubled_hidden = torch.cat([cls_token, doubled_hidden] + end_token, axis=1)
 
         else:
-            doubled_hidden = self._upsample_hidden(hidden)
+            doubled_hidden = self._upsample_hidden(hidden, block_index)
 
         # for odd number of target tokens, prune the interpolated token at the end
         if doubled_hidden.size(1) > target_len:
@@ -114,25 +126,28 @@ class FunnelAeDecoder(nn.Module):
     ):
         # The pooling is not implemented on long tensors, so we convert this mask.
         attention_mask = attention_mask.type_as(block_hiddens[0])
+        hidden = block_hiddens[0]
         attention_inputs = self.attention_structure.init_attention_inputs(
-            block_hiddens[0],
+            hidden,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
         # run the same encoder steps to get attention inputs
         all_attention_inputs = {}
-        hidden = block_hiddens[0]
+        pooled_hidden = None
         for block_index, block_size in enumerate(self.config.block_sizes):
             pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
             pooling_flag = pooling_flag and block_index > 0
             if pooling_flag:
-                _pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
+                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
                     hidden, attention_inputs
                 )
             for layer_index in range(block_size):
                 for repeat_index in range(self.config.block_repeats[block_index]):
                     do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
                     # run layer
+                    if pooled_hidden is not None:
+                        hidden = pooled_hidden
                     all_attention_inputs[block_index, layer_index, repeat_index] = attention_inputs
                     if do_pooling:
                         attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
@@ -140,42 +155,33 @@ class FunnelAeDecoder(nn.Module):
         hidden = final_hidden
         all_hidden_states = (hidden,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
-        last_attention_mask = None
 
         # run the decoder
         for block_index, block in list(enumerate(self.blocks))[::-1]:
             hidden = hidden * (1 - self.skip_w[block_index]) + self.skip_w[block_index] * block_hiddens[block_index]
             upsampling_flag = hidden.size(1) < block_hiddens[0].size(1)
             upsampling_flag = upsampling_flag and block_index > 0
-            if upsampling_flag:
-                target_size = block_hiddens[block_index-1].size(1)
-                upsampled_hidden = self.upsample_hidden(hidden, target_size)
             for (layer_index, layer) in list(enumerate(block))[::-1]:
                 for repeat_index in range(self.config.block_repeats[block_index])[::-1]:
                     do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
-                    if do_upsampling:
-                        query = upsampled_hidden
-                        key = value = hidden if self.config.pool_q_only else upsampled_hidden
+                    query = key = value = hidden
+
+                    if do_upsampling and self.config.upsample_q_only:
+                        # TODO I don't think the attention mask will be the right size here, needs to be the last one used (or just pool it)
+                        query = self.upsample_hidden(query, target_size, block_index)
+                        position_embeds, token_type_mat, attention_mask, cls_mask = all_attention_inputs[block_index, layer_index, repeat_index]
+                        cls_mask = None if cls_mask is None else cls_mask.T
+                        token_type_mat = token_type_mat.permute(0,2,1)
+                        attention_inputs = position_embeds, token_type_mat, attention_mask, cls_mask
                     else:
-                        query = key = value = hidden
-
-                    position_embeds, token_type_mat, attention_mask, cls_mask = all_attention_inputs[block_index, layer_index, repeat_index]
-
-                    cls_mask = None if cls_mask is None else cls_mask.T
-                    token_type_mat = token_type_mat.permute(0,2,1)
-
-                    if query.shape[1] > key.shape[1]:
-                        # if doing query only upsampling, use the previous 1/2 len attention mask
-                        hold = attention_mask
-                        attention_mask = last_attention_mask
-                        last_attention_mask = hold
-                    else:
-                        last_attention_mask = attention_mask
-
-                    attention_inputs = position_embeds, token_type_mat, attention_mask, cls_mask
+                        attention_inputs = all_attention_inputs[block_index, layer_index, repeat_index]
 
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions)
                     hidden = layer_output[0]
+
+                    if do_upsampling and not self.config.upsample_q_only:
+                        target_size = block_hiddens[block_index-1].size(1)
+                        hidden = self.upsample_hidden(hidden, target_size, block_index)
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
