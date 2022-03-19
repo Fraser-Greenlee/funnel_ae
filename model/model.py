@@ -252,7 +252,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
         decoder_outputs = self.decoder(
-            final_hidden=encoder_outputs[0],
+            final_hidden=encoder_outputs[0] if not self.config._randn_enc else torch.randn_like(encoder_outputs[0]),
             # TODO add support for `config.block_repeats`
             block_hiddens=[
                 encoder_outputs[1][
