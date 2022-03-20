@@ -18,6 +18,6 @@
     "report_to": "wandb",
     "overwrite_output_dir": true,
     "output_dir": "outputs/test",
-    "save_strategy": "no",
+    "save_steps": 1000,
     "save_total_limit": 3
 }

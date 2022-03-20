@@ -15,6 +15,6 @@
     "do_train": true,
     "do_eval": true,
     "report_to": "wandb",
-    "save_strategy": "no",
+    "save_steps": 1000,
     "save_total_limit": 3
 }

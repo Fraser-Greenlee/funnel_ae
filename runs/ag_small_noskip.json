@@ -12,11 +12,13 @@
     "run_name": "ag no_skip configs/small",
 
     "logging_steps": 100,
+    "eval_steps": 1000,
+    "evaluation_strategy": "steps",
     "output_dir": "outputs/test",
     "overwrite_output_dir": true,
     "do_train": true,
     "do_eval": true,
     "report_to": "wandb",
-    "save_strategy": "no",
+    "save_steps": 1000,
     "save_total_limit": 3
 }
