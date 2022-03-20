@@ -71,12 +71,13 @@ class FunnelAeDecoder(nn.Module):
         return interpolated_hidden
 
     def _upsample_hidden(self, hidden, block_index):
+        seq_len = hidden.size(1)
+
         if self.config.upsample_mode == "ff_seperator":
             seperators = self.seperators[block_index](hidden)
             cat_hidden = torch.cat((hidden - seperators, hidden + seperators), axis=1)
         else:
             # make new tokens by averaging their adjacents
-            seq_len = hidden.size(1)
             token_ids = list(range(seq_len))
             shifted_token_ids = [token_ids[-1]] + token_ids[:-1]
             shifted_hidden = hidden[:,shifted_token_ids,:]
