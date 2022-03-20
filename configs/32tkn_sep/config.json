@@ -14,9 +14,9 @@
         1
     ],
     "block_sizes": [
-        3,
-        3,
-        2,
+        4,
+        4,
+        4,
         2,
         1,
         1
@@ -37,7 +37,8 @@
     "rel_attention_type": "factorized",
     "separate_cls": false,
     "truncate_seq": true,
-    "share_encoder_blocks": true,
     "type_vocab_size": 3,
-    "vocab_size": 30522
+    "vocab_size": 30522,
+
+    "upsample_mode": "ff_seperator"
 }
