@@ -17,7 +17,7 @@
     "do_train": true,
     "report_to": "wandb",
     "overwrite_output_dir": true,
-    "output_dir": "outputs/test",
+    "output_dir": "/content/drive/MyDrive/output/ag_8tkn_noskip",
     "save_steps": 1000,
     "save_total_limit": 3
 }

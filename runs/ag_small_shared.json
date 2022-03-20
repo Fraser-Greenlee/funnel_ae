@@ -10,7 +10,7 @@
     "run_name": "ag small_shared",
 
     "logging_steps": 100,
-    "output_dir": "outputs/test",
+    "output_dir": "/content/drive/MyDrive/output/ag_small_shared",
     "overwrite_output_dir": true,
     "do_train": true,
     "do_eval": true,

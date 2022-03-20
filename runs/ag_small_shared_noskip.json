@@ -12,7 +12,7 @@
     "run_name": "ag small_shared_noskip",
 
     "logging_steps": 100,
-    "output_dir": "outputs/test",
+    "output_dir": "/content/drive/MyDrive/output/ag_small_shared_noskip",
     "overwrite_output_dir": true,
     "do_train": true,
     "do_eval": true,

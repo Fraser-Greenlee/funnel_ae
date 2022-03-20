@@ -14,7 +14,7 @@
     "logging_steps": 100,
     "eval_steps": 1000,
     "evaluation_strategy": "steps",
-    "output_dir": "outputs/test",
+    "output_dir": "/content/drive/MyDrive/output/ag_small_noskip",
     "overwrite_output_dir": true,
     "do_train": true,
     "do_eval": true,
