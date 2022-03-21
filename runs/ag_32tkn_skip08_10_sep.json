@@ -9,7 +9,7 @@
 
     "skip_con_args": "no,no,0.8 10,no,no,no",
 
-    "run_name": "ag 32tkn no_skip sep",
+    "run_name": "ag 32tkn skip08_10 sep",
 
     "logging_steps": 100,
     "eval_steps": 1000,
