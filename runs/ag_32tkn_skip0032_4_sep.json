@@ -7,9 +7,9 @@
     "per_device_train_batch_size": 128,
     "per_device_eval_batch_size": 128,
 
-    "skip_con_args": "no,no,0.8 10,no,no,no",
+    "skip_con_args": "no,no,0.0032 4,no,no,no",
 
-    "run_name": "ag 32tkn skip08_10 sep",
+    "run_name": "ag 32tkn skip0032_4 sep",
 
     "logging_steps": 100,
     "eval_steps": 1000,
@@ -17,7 +17,7 @@
     "do_train": true,
     "report_to": "wandb",
     "overwrite_output_dir": true,
-    "output_dir": "/content/drive/MyDrive/output/ag_32tkn_skip08_10_sep",
+    "output_dir": "/content/drive/MyDrive/output/ag_32tkn_skip0032_4_sep",
     "save_steps": 1000,
     "save_total_limit": 3
 }
