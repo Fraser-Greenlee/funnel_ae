@@ -8,33 +8,37 @@ from transformers.training_args import TrainingArguments
 
 @dataclass
 class AeTrainingArguments(TrainingArguments):
-    use_skip_con: bool = field(default=True,  metadata={"help": "Use skip connection weights."})
-    skip_conn_schedule_k: float = field(default=0.0014,   metadata={"help": "Multiplied by global_step in a sigmoid, more gradually increase regulariser loss weight."})
-    skip_conn_schedule_b: float = field(default=3,     metadata={"help": "Added to global step in sigmoid, further delays increase in regulariser loss weight."})
-    skip_conn_schedule_b_offsets: str = field(default="", metadata={"help": "Delays reduction of early skip layers."})
+    skip_con_args: str = field(default=None, metadata={"help": "Args for skip connections, one per block, (k, b), 'no' to not use connection"})
     dont_train_encoder: bool = field(default=False, metadata={"help": "Don't optimize encoder parameters."})
 
     def __post_init__(self):
         super().__post_init__()
-        self.skip_conn_schedule_b_offsets = [
-            float(v) for v in self.skip_conn_schedule_b_offsets.split()
-        ]
+        if self.skip_con_args:
+            skip_args = []
+            for str_args in self.skip_con_args.split(','):
+                if str_args == "no":
+                    skip_args.append((None, None))
+                else:
+                    skip_args.append([float(v) for v in str_args.split()])
+            self.skip_con_args = skip_args
+        else:
+            self.skip_con_args = None
+
 
 class AeTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.args.skip_conn_schedule_b_offsets:
-            assert len(self.model.config.block_sizes) == len(self.args.skip_conn_schedule_b_offsets)
-        else:
-            self.args.skip_conn_schedule_b_offsets = [0 for _ in self.model.config.block_sizes]
-        self.skip_conn_schedule_b_offsets = torch.tensor(self.args.skip_conn_schedule_b_offsets, requires_grad=False)
+        if self.args.skip_con_args:
+            assert len(self.model.config.block_sizes) == len(self.args.skip_con_args)
 
     def _skip_connection_weights(self):
-        return torch.sigmoid(
-            self.state.global_step * self.args.skip_conn_schedule_k
-            - self.args.skip_conn_schedule_b
-            -  self.skip_conn_schedule_b_offsets
-        ).tolist()
+        weights = []
+        for (k, b) in self.args.skip_con_args:
+            if k is None:
+                weights.append(0.0)
+            else:
+                weights.append(torch.sigmoid(self.state.global_step * k - b))
+        return torch.tensor(weights)
 
     def compute_loss(self, model, inputs, return_outputs=False):
         if self.args.use_skip_con and self.state.global_step:
