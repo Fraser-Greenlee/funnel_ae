@@ -63,6 +63,12 @@ class FunnelAeDecoder(nn.Module):
             self.seperators = nn.ModuleList([
                 FunnelPositionwiseFFN(config) for _ in config.block_sizes
             ])
+        elif config.upsample_mode == "lin_seperator":
+            self.seperators = nn.ModuleList([
+                nn.Linear(config.d_model, config.d_model) for _ in config.block_sizes
+            ])
+        elif config.upsample_mode:
+            raise NotImplementedError(f'Not implimeneted `config.upsample_mode`={config.upsample_mode}')
         self.skip_w = [0 for _ in config.block_sizes]
 
     @staticmethod
@@ -73,7 +79,7 @@ class FunnelAeDecoder(nn.Module):
     def _upsample_hidden(self, hidden, block_index):
         seq_len = hidden.size(1)
 
-        if self.config.upsample_mode == "ff_seperator":
+        if self.config.upsample_mode:
             seperators = self.seperators[block_index](hidden)
             cat_hidden = torch.cat((hidden - seperators, hidden + seperators), axis=1)
         else:
