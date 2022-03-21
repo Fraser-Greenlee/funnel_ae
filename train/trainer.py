@@ -69,7 +69,8 @@ class AeTrainer(Trainer):
             logs["learning_rate"] = self._get_learning_rate()
 
             if self.args.skip_con_args:
-                for i, weight in enumerate(model.funnel.decoder.skip_w):
+                skip_weights = model.funnel.decoder.skip_w.tolist()
+                for i, weight in enumerate(skip_weights):
                     logs[f"skip_con_{i}"] = weight
 
             self._total_loss_scalar += tr_loss_scalar
