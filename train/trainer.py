@@ -8,7 +8,7 @@ from transformers.training_args import TrainingArguments
 
 @dataclass
 class AeTrainingArguments(TrainingArguments):
-    skip_con_args: str = field(default=None, metadata={"help": "Args for skip connections, one per block, (k, b), 'no' to not use connection"})
+    skip_con_args: str = field(default=None, metadata={"help": "Args for skip connections, one per block, (k, b), 'no' to not use connection. See https://www.desmos.com/calculator/qcl82whtzo"})
     dont_train_encoder: bool = field(default=False, metadata={"help": "Don't optimize encoder parameters."})
 
     def __post_init__(self):
