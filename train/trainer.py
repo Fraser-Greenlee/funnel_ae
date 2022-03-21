@@ -37,11 +37,15 @@ class AeTrainer(Trainer):
             if k is None:
                 weights.append(0.0)
             else:
-                weights.append(torch.sigmoid(self.state.global_step * k - b))
+                weights.append(
+                    torch.sigmoid(
+                        torch.tensor(self.state.global_step * k - b)
+                    )
+                )
         return torch.tensor(weights)
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        if self.args.use_skip_con and self.state.global_step:
+        if self.args.skip_con_args and type(self.state.global_step) is int:
             model.funnel.decoder.skip_w = self._skip_connection_weights()
         return super().compute_loss(model, inputs, return_outputs=return_outputs)
 
