@@ -39,7 +39,7 @@ class AeTrainer(Trainer):
             else:
                 weights.append(
                     torch.sigmoid(
-                        torch.tensor(self.state.global_step * k - b)
+                        torch.tensor(b - self.state.global_step * k)
                     )
                 )
         return torch.tensor(weights)
