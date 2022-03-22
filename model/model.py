@@ -230,6 +230,7 @@ class MMD_VAE(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        # TODO try tanh
         self.enc = PositionwiseLatentFFN(config)
         self.dec = PositionwiseLatentFFN(config, is_encoder=False)
 
@@ -291,7 +292,7 @@ class KL_VAE(nn.Module):
         return recon, latent, reg_loss
 
 
-VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, '': None}
+VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, '': lambda *args: None}
 
 
 class BaseVAEModelOutput(BaseModelOutput):
@@ -305,7 +306,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         self.base_funnel = FunnelBaseModel(config)
         self.embeddings = self.base_funnel.embeddings
         self.decoder = FunnelAeDecoder(config, encoder_blocks=self.base_funnel.encoder.blocks if config.share_encoder_blocks else None)
-        self.vae = VAEs[self.config.vae]
+        self.vae = VAEs[self.config.vae](config)
         self.encoder_held_out_blocks = []
         self.decoder_held_out_blocks = []
 
@@ -429,9 +430,21 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         self.funnel = FunnelAeModel(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
+        self.masked_lm_loss = 0.0
+        self.masked_reg_loss = 0.0
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def get_masked_lm_loss(self):
+        result = self.masked_lm_loss
+        self.masked_lm_loss = 0.0
+        return result
+
+    def get_reg_loss(self):
+        result = self.masked_reg_loss
+        self.masked_reg_loss = 0.0
+        return result
 
     def forward(
         self,
@@ -471,7 +484,11 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
             masked_lm_loss = loss_fct(prediction_logits.view(-1, self.config.vocab_size), labels.view(-1))
 
         reg_loss = outputs[-1]
+
         if reg_loss is not None and masked_lm_loss is not None:
+            if self.training:
+                self.masked_lm_loss += masked_lm_loss
+                self.reg_loss += reg_loss
             masked_lm_loss += reg_loss
 
         if not return_dict:
