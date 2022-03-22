@@ -10,9 +10,6 @@ from transformers.training_args import TrainingArguments
 class AeTrainingArguments(TrainingArguments):
     skip_con_args: str = field(default=None, metadata={"help": "Args for skip connections, one per block, (k, b), 'no' to not use connection. See https://www.desmos.com/calculator/qcl82whtzo"})
     dont_train_encoder: bool = field(default=False, metadata={"help": "Don't optimize encoder parameters."})
-    gradually_add_blocks: bool = field(default=False, metadata={"help": "Start by optimizing outer blocks, gradually adding inner blocks as loss lowers."})
-    add_blocks_from_inner: bool = field(default=False, metadata={"help": "Switch to optimizing inner blocks first with longer than std seq length."})
-    add_block_min_eval_loss: float = field(default=10.0, metadata={"help": "Min eval loss to add a block."})
 
     def __post_init__(self):
         super().__post_init__()
@@ -76,9 +73,6 @@ class AeTrainer(Trainer):
                 for i, weight in enumerate(skip_weights):
                     logs[f"skip_con_{i}"] = weight
 
-            if self.args.gradually_add_blocks:
-                logs["n_blocks"] = self.model.funnel.n_blocks()
-
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
@@ -88,13 +82,7 @@ class AeTrainer(Trainer):
         metrics = None
         if self.control.should_evaluate:
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
-
-            if self.args.gradually_add_blocks and len(self.model.funnel.encoder_held_out_blocks) > 0 and metrics['loss'] < self.args.add_block_min_eval_loss:
-                n = self.model.funnel.n_blocks()
-                if self.args.add_blocks_from_inner:
-                    n *= -1
-                self.model.funnel.cut_to_n_blocks(n)
-
+            # TODO change skip w based on loss?
             self._report_to_hp_search(trial, epoch, metrics)
 
         if self.control.should_save:

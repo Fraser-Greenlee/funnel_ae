@@ -222,23 +222,6 @@ class FunnelAeModel(FunnelAePreTrainedModel):
     def set_input_embeddings(self, new_embeddings):
         self.embeddings.word_embeddings = new_embeddings
 
-    def _cut_blocks(self, n, model_blocks, held_out_blocks):
-        blocks = held_out_blocks + [block for block in model_blocks]
-        return nn.ModuleList(blocks[n:]), blocks[:n]
-
-    def cut_to_n_blocks(self, n):
-        if n == 0:
-            n = len(self.decoder.blocks)
-        self.base_funnel.encoder.blocks, self.encoder_held_out_blocks = self._cut_blocks(
-            n, self.base_funnel.encoder.blocks, self.encoder_held_out_blocks
-        )
-        self.decoder.blocks, self.decoder_held_out_blocks = self._cut_blocks(
-            n, self.decoder.blocks, self.decoder_held_out_blocks
-        )
-
-    def n_blocks(self):
-        return len(self.base_funnel.encoder.blocks)
-
     def forward(
         self,
         input_ids=None,
@@ -285,6 +268,8 @@ class FunnelAeModel(FunnelAePreTrainedModel):
             attention_mask = torch.ones(input_shape, device=device)
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+
+        assert max(self.config.block_repeats) == 1 # breaks skip conn
 
         decoder_outputs = self.decoder(
             final_hidden=encoder_outputs[0] if not self.config._randn_enc else torch.randn_like(encoder_outputs[0]),
