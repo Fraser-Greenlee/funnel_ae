@@ -65,7 +65,8 @@ class FunnelAeDecoder(nn.Module):
             ])
         elif config.upsample_mode == "lin_seperator":
             self.seperators = nn.ModuleList([
-                nn.Linear(config.d_model, config.d_model) for _ in config.block_sizes
+                nn.ModuleList([nn.Linear(config.d_model, config.d_model), nn.LayerNorm(config.d_model, config.layer_norm_eps)])
+                for _ in config.block_sizes
             ])
         elif config.upsample_mode == "double_avg":
             pass
