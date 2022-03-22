@@ -8,18 +8,12 @@
     "block_repeats": [
         1,
         1,
-        1,
-        1,
-        1,
         1
     ],
     "block_sizes": [
         4,
         4,
-        4,
-        2,
-        1,
-        1
+        4
     ],
     "d_head": 64,
     "d_inner": 3072,
@@ -38,7 +32,5 @@
     "separate_cls": false,
     "truncate_seq": true,
     "type_vocab_size": 3,
-    "vocab_size": 30522,
-
-    "upsample_mode": "ff_seperator"
+    "vocab_size": 30522
 }

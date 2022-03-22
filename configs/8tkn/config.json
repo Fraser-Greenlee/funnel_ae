@@ -32,5 +32,7 @@
     "separate_cls": false,
     "truncate_seq": true,
     "type_vocab_size": 3,
-    "vocab_size": 30522
+    "vocab_size": 30522,
+
+    "upsample_mode": "ff_seperator"
 }

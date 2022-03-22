@@ -2,14 +2,15 @@
     "pad_to_multiple_of": 2,
     "dataset_name": "ag_news",
     "max_seq_length": 32,
-    "config_name": "configs/32tkn_sep_lin",
+    "config_name": "configs/32tkn",
     "tokenizer_name": "funnel-transformer/small",
     "per_device_train_batch_size": 128,
     "per_device_eval_batch_size": 128,
 
     "use_skip_con": false,
+    "gradually_add_blocks": true,
 
-    "run_name": "ag 32tkn no_skip seplin",
+    "run_name": "ag 32tkn addblocks",
 
     "logging_steps": 100,
     "eval_steps": 1000,
@@ -17,7 +18,7 @@
     "do_train": true,
     "report_to": "wandb",
     "overwrite_output_dir": true,
-    "output_dir": "/content/drive/MyDrive/output/ag_32tkn_noskip_seplin",
+    "output_dir": "/content/drive/MyDrive/output/ag_32tkn_addblocks",
     "save_steps": 1000,
     "save_total_limit": 3
 }
