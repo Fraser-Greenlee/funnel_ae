@@ -6,8 +6,6 @@
     "tokenizer_name": "funnel-transformer/small",
     "per_device_train_batch_size": 128,
     "per_device_eval_batch_size": 128,
-
-    "use_skip_con": false,
     "dont_train_encoder": true,
 
     "run_name": "ag 8tkn no_skip dont_train_encoder",
