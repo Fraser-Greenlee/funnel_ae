@@ -267,6 +267,19 @@ class MMD_VAE(nn.Module):
         return recon, latent, reg_loss
 
 
+class AE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        # TODO try tanh
+        self.enc = PositionwiseLatentFFN(config)
+        self.dec = PositionwiseLatentFFN(config, is_encoder=False)
+
+    def forward(self, hidden):
+        latent = self.enc(hidden)
+        recon = self.dec(latent)
+        return recon, latent, None
+
 class KL_VAE(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -292,7 +305,7 @@ class KL_VAE(nn.Module):
         return recon, latent, reg_loss
 
 
-VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, '': lambda *args: None}
+VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, 'AE': AE, '': lambda *args: None}
 
 
 class BaseVAEModelOutput(BaseModelOutput):
@@ -485,7 +498,7 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         reg_loss = outputs[-1]
 
-        if reg_loss is not None and masked_lm_loss is not None:
+        if reg_loss is not None and masked_lm_loss is not None and reg_loss is not None:
             if self.training:
                 self.masked_lm_loss += masked_lm_loss
                 self.reg_loss += reg_loss
