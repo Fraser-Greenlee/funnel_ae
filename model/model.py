@@ -2,9 +2,10 @@ import copy
 import numpy as np
 import torch
 from torch import nn
-from transformers.modeling_outputs import BaseModelOutput
+from torch.nn import CrossEntropyLoss
+from transformers.modeling_outputs import BaseModelOutput, MaskedLMOutput
 from transformers.models.funnel.modeling_funnel import (
-    FunnelLayer, FunnelAttentionStructure, FunnelPositionwiseFFN
+    FunnelLayer, FunnelAttentionStructure, FunnelPositionwiseFFN, ACT2FN
 )
 from transformers import (
     FunnelBaseModel,
@@ -203,6 +204,100 @@ class FunnelAeDecoder(nn.Module):
         return BaseModelOutput(last_hidden_state=hidden, hidden_states=all_hidden_states, attentions=all_attentions)
 
 
+class PositionwiseLatentFFN(nn.Module):
+    def __init__(self, config, is_encoder=True):
+        super().__init__()
+        self.d_in = config.d_model if is_encoder else config.d_latent
+        self.d_out = config.d_latent if is_encoder else config.d_model
+
+        self.linear_1 = nn.Linear(self.d_in, config.d_inner)
+        self.activation_function = ACT2FN[config.hidden_act]
+        self.activation_dropout = nn.Dropout(config.activation_dropout)
+        self.linear_2 = nn.Linear(config.d_inner, self.d_out)
+        self.dropout = nn.Dropout(config.hidden_dropout)
+        self.layer_norm = nn.LayerNorm(self.d_out, config.layer_norm_eps)
+
+    def forward(self, hidden):
+        h = self.linear_1(hidden)
+        h = self.activation_function(h)
+        h = self.activation_dropout(h)
+        h = self.linear_2(h)
+        h = self.dropout(h)
+        return self.layer_norm(hidden)
+
+
+class MMD_VAE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.enc = PositionwiseLatentFFN(config)
+        self.dec = PositionwiseLatentFFN(config, is_encoder=False)
+
+    @staticmethod
+    def _compute_kernel(x, y):
+        x_size = x.shape[0]
+        y_size = y.shape[0]
+        dim = x.shape[1]
+
+        tiled_x = x.view(x_size, 1, dim).repeat(1, y_size, 1)
+        tiled_y = y.view(1, y_size, dim).repeat(x_size, 1, 1)
+
+        return torch.exp(-torch.mean((tiled_x - tiled_y) ** 2, dim=2) / dim * 1.0)
+
+    def _compute_mmd(self, x, y):
+        x_kernel = self._compute_kernel(x, x)
+        y_kernel = self._compute_kernel(y, y)
+        xy_kernel = self._compute_kernel(x, y)
+        return torch.mean(x_kernel) + torch.mean(y_kernel) - 2 * torch.mean(xy_kernel)
+
+    def _reg_loss(self, latent):
+        true_samples = torch.randn(latent.size(), device=latent.device)
+        return self._compute_mmd(true_samples, latent)
+
+    def reg_loss(self, latent):
+        batch_size, n_latents_per_batch, latent_code_dim = latent.size()
+        reg_loss = self._reg_loss(latent.reshape(-1, latent_code_dim)) / batch_size * n_latents_per_batch
+        return reg_loss
+
+    def forward(self, hidden):
+        latent = self.enc(hidden)
+        recon = self.dec(latent)
+        reg_loss = self.reg_loss(latent)
+        return recon, latent, reg_loss
+
+
+class KL_VAE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.mu = PositionwiseLatentFFN(config)
+        self.var = PositionwiseLatentFFN(config)
+        self.dec = PositionwiseLatentFFN(config, is_encoder=False)
+
+    def _reg_loss(self, mu, logvar):
+        kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
+        return self.config.beta * kld_loss
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return eps * std + mu
+
+    def forward(self, hidden):
+        mu, logvar = self.mu(hidden), self.var(hidden)
+        latent = self.reparameterize(mu, logvar)
+        recon = self.dec(latent)
+        reg_loss = self.reg_loss(mu, logvar)
+        return recon, latent, reg_loss
+
+
+VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, '': None}
+
+
+class BaseVAEModelOutput(BaseModelOutput):
+    reg_loss: torch.FloatTensor = None
+
+
 class FunnelAeModel(FunnelAePreTrainedModel):
     def __init__(self,config):
         super().__init__(config)
@@ -210,6 +305,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         self.base_funnel = FunnelBaseModel(config)
         self.embeddings = self.base_funnel.embeddings
         self.decoder = FunnelAeDecoder(config, encoder_blocks=self.base_funnel.encoder.blocks if config.share_encoder_blocks else None)
+        self.vae = VAEs[self.config.vae]
         self.encoder_held_out_blocks = []
         self.decoder_held_out_blocks = []
 
@@ -288,8 +384,10 @@ class FunnelAeModel(FunnelAePreTrainedModel):
 
         assert max(self.config.block_repeats) == 1 # breaks skip conn
 
+        recon_hidden, latent, reg_loss = self.vae(encoder_outputs[0]) if self.vae is not None else encoder_outputs[0], None, None
+
         decoder_outputs = self.decoder(
-            final_hidden=encoder_outputs[0] if not self.config._randn_enc else torch.randn_like(encoder_outputs[0]),
+            final_hidden=recon_hidden if not self.config._randn_enc else torch.randn_like(recon_hidden),
             # TODO add support for `config.block_repeats`
             block_hiddens=[
                 encoder_outputs[1][
@@ -315,12 +413,13 @@ class FunnelAeModel(FunnelAePreTrainedModel):
                 outputs = outputs + (encoder_outputs[2] + decoder_outputs[idx],)
             return outputs
 
-        return BaseModelOutput(
+        return BaseVAEModelOutput(
             last_hidden_state=decoder_outputs[0],
-            hidden_states=(encoder_outputs.hidden_states + decoder_outputs.hidden_states)
+            hidden_states=(encoder_outputs.hidden_states + ([latent, recon_hidden] if latent else []) + decoder_outputs.hidden_states)
             if output_hidden_states
             else None,
             attentions=(encoder_outputs.attentions + decoder_outputs.attentions) if output_attentions else None,
+            reg_loss=reg_loss,
         )
 
 
@@ -333,3 +432,55 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
+            config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored (masked), the
+            loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.funnel(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        last_hidden_state = outputs[0]
+        prediction_logits = self.lm_head(last_hidden_state)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()  # -100 index = padding token
+            masked_lm_loss = loss_fct(prediction_logits.view(-1, self.config.vocab_size), labels.view(-1))
+
+        reg_loss = outputs[-1]
+        if reg_loss is not None and masked_lm_loss is not None:
+            masked_lm_loss += reg_loss
+
+        if not return_dict:
+            output = (prediction_logits,) + outputs[1:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
