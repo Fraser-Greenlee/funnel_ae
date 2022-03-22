@@ -31,7 +31,7 @@ class FunnelAeConfig(FunnelConfig):
         upsample_q_only=False,
         upsample_mode="ff_seperator",
         vae=None,
-        latent_dim=None,
+        d_latent=None,
         _randn_enc=False,
         **kwargs
     ):
@@ -39,9 +39,10 @@ class FunnelAeConfig(FunnelConfig):
         self.upsample_q_only = upsample_q_only
         self.upsample_mode = upsample_mode
         self.vae = vae
-        self.latent_dim = latent_dim
+        self.d_latent = d_latent
         if vae:
-            assert self.latent_dim > 0
+            assert type(self.d_latent) is int
+            assert self.d_latent > 0
         self._randn_enc = _randn_enc
         super().__init__(vocab_size, block_sizes, block_repeats, num_decoder_layers, d_model, n_head, d_head, d_inner, hidden_act, hidden_dropout, attention_dropout, activation_dropout, max_position_embeddings, type_vocab_size, initializer_range, initializer_std, layer_norm_eps, pooling_type, attention_type, separate_cls, truncate_seq, pool_q_only, **kwargs)
         self.num_decoder_layers = None

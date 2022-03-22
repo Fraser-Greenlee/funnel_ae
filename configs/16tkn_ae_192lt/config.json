@@ -8,11 +8,14 @@
     "block_repeats": [
         1,
         1,
+        1,
+        1,
         1
     ],
     "block_sizes": [
         4,
         4,
+        2,
         2,
         1
     ],

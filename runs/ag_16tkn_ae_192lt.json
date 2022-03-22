@@ -2,7 +2,7 @@
     "pad_to_multiple_of": 2,
     "dataset_name": "ag_news",
     "max_seq_length": 16,
-    "config_name": "configs/6tkn_ae_192lt",
+    "config_name": "configs/16tkn_ae_192lt",
     "tokenizer_name": "funnel-transformer/small",
     "per_device_train_batch_size": 128,
     "per_device_eval_batch_size": 128,

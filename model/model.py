@@ -1,9 +1,10 @@
 import copy
+from typing import Optional, Tuple
 import numpy as np
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers.modeling_outputs import BaseModelOutput, MaskedLMOutput
+from transformers.modeling_outputs import BaseModelOutput, ModelOutput, MaskedLMOutput
 from transformers.models.funnel.modeling_funnel import (
     FunnelLayer, FunnelAttentionStructure, FunnelPositionwiseFFN, ACT2FN
 )
@@ -73,7 +74,6 @@ class FunnelAeDecoder(nn.Module):
             pass
         elif config.upsample_mode:
             raise NotImplementedError(f'Not implimeneted `config.upsample_mode`={config.upsample_mode}')
-        self.skip_w = [0 for _ in config.block_sizes]
 
     @staticmethod
     def avg_hidden(hidden1, hidden2):
@@ -169,7 +169,9 @@ class FunnelAeDecoder(nn.Module):
 
         # run the decoder
         for block_index, block in list(enumerate(self.blocks))[::-1]:
-            hidden = hidden * (1 - self.skip_w[block_index]) + self.skip_w[block_index] * block_hiddens[block_index]
+            # TODO allow skip connections from sampled latent tokens
+            # if latent block index:
+            #     hidden += latent_hidden[block_index] 
             upsampling_flag = hidden.size(1) < block_hiddens[0].size(1)
             upsampling_flag = upsampling_flag and block_index > 0
             for (layer_index, layer) in list(enumerate(block))[::-1]:
@@ -220,10 +222,11 @@ class PositionwiseLatentFFN(nn.Module):
     def forward(self, hidden):
         h = self.linear_1(hidden)
         h = self.activation_function(h)
+        # TODO remove dropout?
         h = self.activation_dropout(h)
         h = self.linear_2(h)
         h = self.dropout(h)
-        return self.layer_norm(hidden)
+        return self.layer_norm(h)
 
 
 class MMD_VAE(nn.Module):
@@ -308,8 +311,12 @@ class KL_VAE(nn.Module):
 VAEs = {'MMD': MMD_VAE, 'KL': KL_VAE, 'AE': AE, '': lambda *args: None}
 
 
-class BaseVAEModelOutput(BaseModelOutput):
+class BaseVAEModelOutput(ModelOutput):
     reg_loss: torch.FloatTensor = None
+    last_hidden_state: torch.FloatTensor = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+
 
 
 class FunnelAeModel(FunnelAePreTrainedModel):
@@ -396,9 +403,9 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
-        assert max(self.config.block_repeats) == 1 # breaks skip conn
+        assert max(self.config.block_repeats) == 1 # breaks `block_hiddens`
 
-        recon_hidden, latent, reg_loss = self.vae(encoder_outputs[0]) if self.vae is not None else encoder_outputs[0], None, None
+        recon_hidden, latent, reg_loss = self.vae(encoder_outputs[0]) if self.vae is not None else (encoder_outputs[0], None, None)
 
         decoder_outputs = self.decoder(
             final_hidden=recon_hidden if not self.config._randn_enc else torch.randn_like(recon_hidden),
@@ -428,12 +435,12 @@ class FunnelAeModel(FunnelAePreTrainedModel):
             return outputs
 
         return BaseVAEModelOutput(
+            reg_loss=reg_loss,
             last_hidden_state=decoder_outputs[0],
             hidden_states=(encoder_outputs.hidden_states + ([latent, recon_hidden] if latent else []) + decoder_outputs.hidden_states)
             if output_hidden_states
             else None,
             attentions=(encoder_outputs.attentions + decoder_outputs.attentions) if output_attentions else None,
-            reg_loss=reg_loss,
         )
 
 
@@ -488,7 +495,7 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
             return_dict=return_dict,
         )
 
-        last_hidden_state = outputs[0]
+        last_hidden_state = outputs[1]
         prediction_logits = self.lm_head(last_hidden_state)
 
         masked_lm_loss = None
@@ -496,7 +503,7 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
             loss_fct = CrossEntropyLoss()  # -100 index = padding token
             masked_lm_loss = loss_fct(prediction_logits.view(-1, self.config.vocab_size), labels.view(-1))
 
-        reg_loss = outputs[-1]
+        reg_loss = outputs[0]
 
         if reg_loss is not None and masked_lm_loss is not None and reg_loss is not None:
             if self.training:
@@ -505,7 +512,7 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
             masked_lm_loss += reg_loss
 
         if not return_dict:
-            output = (prediction_logits,) + outputs[1:]
+            output = (prediction_logits,) + outputs[2:]
             return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
 
         return MaskedLMOutput(
