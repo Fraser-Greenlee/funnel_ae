@@ -36,5 +36,6 @@
     "vocab_size": 30522,
 
     "upsample_mode": "ff_seperator",
-    "d_latent": 48
+    "vae": "AE",
+    "d_latent": 192
 }
