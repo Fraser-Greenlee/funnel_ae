@@ -29,7 +29,7 @@ class FunnelAeConfig(FunnelConfig):
         # new
         share_encoder_blocks=False,
         upsample_q_only=False,
-        upsample_mode=None,
+        upsample_mode="ff_seperator",
         _randn_enc=False,
         **kwargs
     ):
