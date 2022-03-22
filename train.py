@@ -490,6 +490,8 @@ def main():
 
     # Training
     if training_args.do_train:
+        model.funnel.cut_to_n_blocks(1)
+
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
@@ -512,6 +514,7 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
+        model.funnel.cut_to_n_blocks(0)
         metrics = trainer.evaluate()
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)

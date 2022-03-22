@@ -67,6 +67,8 @@ class FunnelAeDecoder(nn.Module):
             self.seperators = nn.ModuleList([
                 nn.Linear(config.d_model, config.d_model) for _ in config.block_sizes
             ])
+        elif config.upsample_mode == "double_avg":
+            pass
         elif config.upsample_mode:
             raise NotImplementedError(f'Not implimeneted `config.upsample_mode`={config.upsample_mode}')
         self.skip_w = [0 for _ in config.block_sizes]
@@ -207,6 +209,8 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         self.base_funnel = FunnelBaseModel(config)
         self.embeddings = self.base_funnel.embeddings
         self.decoder = FunnelAeDecoder(config, encoder_blocks=self.base_funnel.encoder.blocks if config.share_encoder_blocks else None)
+        self.encoder_held_out_blocks = []
+        self.decoder_held_out_blocks = []
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -216,6 +220,23 @@ class FunnelAeModel(FunnelAePreTrainedModel):
 
     def set_input_embeddings(self, new_embeddings):
         self.embeddings.word_embeddings = new_embeddings
+
+    def _cut_blocks(self, n, model_blocks, held_out_blocks):
+        blocks = held_out_blocks + [block for block in model_blocks]
+        return nn.ModuleList(blocks[n:]), blocks[:n]
+
+    def cut_to_n_blocks(self, n):
+        if n == 0:
+            n = len(self.decoder.blocks)
+        self.base_funnel.encoder.blocks, self.encoder_held_out_blocks = self._cut_blocks(
+            n, self.base_funnel.encoder.blocks, self.encoder_held_out_blocks
+        )
+        self.decoder.blocks, self.decoder_held_out_blocks = self._cut_blocks(
+            n, self.decoder.blocks, self.decoder_held_out_blocks
+        )
+
+    def n_blocks(self):
+        return len(self.base_funnel.encoder.blocks)
 
     def forward(
         self,
