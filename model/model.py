@@ -437,7 +437,7 @@ class FunnelAeModel(FunnelAePreTrainedModel):
         return BaseVAEModelOutput(
             reg_loss=reg_loss,
             last_hidden_state=decoder_outputs[0],
-            hidden_states=(encoder_outputs.hidden_states + ([latent, recon_hidden] if latent else []) + decoder_outputs.hidden_states)
+            hidden_states=(encoder_outputs.hidden_states + ((latent, recon_hidden) if latent is not None else []) + decoder_outputs.hidden_states)
             if output_hidden_states
             else None,
             attentions=(encoder_outputs.attentions + decoder_outputs.attentions) if output_attentions else None,
