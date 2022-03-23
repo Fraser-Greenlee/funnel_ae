@@ -1,3 +1,4 @@
+import torch
 from dataclasses import dataclass
 from typing import Dict
 from transformers.trainer import Trainer
@@ -6,7 +7,11 @@ from transformers.training_args import TrainingArguments
 
 @dataclass
 class AeTrainingArguments(TrainingArguments):
-    pass
+    def __post_init__(self):
+        if self.output_dir and not torch.cuda.is_available():
+            self.output_dir = 'test'
+        return super().__post_init__()
+
 
 class AeTrainer(Trainer):
 
