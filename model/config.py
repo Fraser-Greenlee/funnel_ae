@@ -32,6 +32,7 @@ class FunnelAeConfig(FunnelConfig):
         upsample_mode="ff_seperator",
         vae=None,
         d_latent=None,
+        beta=1.0,
         _randn_enc=False,
         **kwargs
     ):
@@ -40,6 +41,7 @@ class FunnelAeConfig(FunnelConfig):
         self.upsample_mode = upsample_mode
         self.vae = vae
         self.d_latent = d_latent
+        self.beta = beta
         if vae:
             assert type(self.d_latent) is int
             assert self.d_latent > 0

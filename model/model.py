@@ -291,7 +291,7 @@ class KL_VAE(nn.Module):
         self.var = PositionwiseLatentFFN(config)
         self.dec = PositionwiseLatentFFN(config, is_encoder=False)
 
-    def _reg_loss(self, mu, logvar):
+    def reg_loss(self, mu, logvar):
         kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
         return self.config.beta * kld_loss
 
@@ -304,7 +304,7 @@ class KL_VAE(nn.Module):
         mu, logvar = self.mu(hidden), self.var(hidden)
         latent = self.reparameterize(mu, logvar)
         recon = self.dec(latent)
-        reg_loss = self.reg_loss(mu, logvar)
+        reg_loss = self.reg_loss(mu, logvar).mean()
         return recon, latent, reg_loss
 
 
@@ -450,20 +450,20 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         self.funnel = FunnelAeModel(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
-        self.masked_lm_loss = 0.0
-        self.masked_reg_loss = 0.0
+        self.tr_masked_lm_loss = 0.0
+        self.tr_reg_loss = 0.0
 
         # Initialize weights and apply final processing
         self.post_init()
 
     def get_masked_lm_loss(self):
-        result = self.masked_lm_loss
-        self.masked_lm_loss = 0.0
+        result = self.tr_masked_lm_loss
+        self.tr_masked_lm_loss = 0.0
         return result
 
     def get_reg_loss(self):
-        result = self.masked_reg_loss
-        self.masked_reg_loss = 0.0
+        result = self.tr_reg_loss
+        self.tr_reg_loss = 0.0
         return result
 
     def forward(
@@ -507,8 +507,8 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         if reg_loss is not None and masked_lm_loss is not None and reg_loss is not None:
             if self.training:
-                self.masked_lm_loss += masked_lm_loss
-                self.reg_loss += reg_loss
+                self.tr_masked_lm_loss += masked_lm_loss
+                self.tr_reg_loss += reg_loss
             masked_lm_loss += reg_loss
 
         if not return_dict:
