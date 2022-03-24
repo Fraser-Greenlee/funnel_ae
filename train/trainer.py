@@ -112,14 +112,8 @@ class AeTrainer(Trainer):
                     torch.concat((v, outputs.hidden_states[i].detach().cpu())) for i, v in enumerate(hidden_states)
                 ]
 
-        # TODO
-        # - log logits greedy VS true predictions
-        # - plot histogram z-values for latent dimensions
-        # - plot pca of hidden dimensions
-        # - plot t-SNE of latent codes across test dataset for several ?
         latents = hidden_states[1 + (torch.tensor(model.config.block_sizes) * torch.tensor(model.config.block_repeats)).sum()]
 
-        # TODO see how to do wandb plots
         breakpoint()
 
         preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
@@ -127,6 +121,7 @@ class AeTrainer(Trainer):
         table = wandb.Table(columns=['prediction', 'target'], data=zip(preds, targets))
         wandb.log({'Preficted text': table})
 
+        # TODO incorperate the dataset `label` field if present.
         for n_components in [2, 5, 30, 50, 100]:
             tsne = TSNE(n_components=n_components, random_state=123)
             z = tsne.fit_transform(latents)
@@ -134,10 +129,6 @@ class AeTrainer(Trainer):
             # TODO log row `label` with scatter values, should see unsupervised classification
             wandb.log({f"latent t-sne {n_components} components" : wandb.plots.scatter(table, "z_0", "z_1", title="T-SNE On latent codes.")})
 
-        # TODO n principle components per hidden state (across layers)
-        # through the model its principle components should change.
-        # it should get more variation across layers
-        # n_princicple components should increase?
         explained_variances = []
         for hidden in hidden_states:
             pca = PCA()
