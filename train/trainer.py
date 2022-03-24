@@ -1,9 +1,13 @@
 import logging
 from dataclasses import dataclass
+from msilib import Table
 from typing import Dict, Optional, List
 from tqdm import tqdm
+import wandb
 import torch
 from torch.utils.data import Dataset
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 from transformers.trainer import Trainer
 from transformers.trainer_utils import has_length
 from transformers.trainer_pt_utils import find_batch_size
@@ -23,7 +27,6 @@ class AeTrainingArguments(TrainingArguments):
 
 
 class AeTrainer(Trainer):
-
     def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
         if self.control.should_log:
 
@@ -111,14 +114,66 @@ class AeTrainer(Trainer):
 
         # TODO
         # - log logits greedy VS true predictions
-        # - plot histogram values across all latent dimensions
+        # - plot histogram z-values for latent dimensions
         # - plot pca of hidden dimensions
         # - plot t-SNE of latent codes across test dataset for several ?
-        preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
-        targets = self.tokenizer.batch_decode(input_ids)
         latents = hidden_states[1 + (torch.tensor(model.config.block_sizes) * torch.tensor(model.config.block_repeats)).sum()]
 
         # TODO see how to do wandb plots
         breakpoint()
+
+        preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
+        targets = self.tokenizer.batch_decode(input_ids)
+        table = wandb.Table(columns=['prediction', 'target'], data=zip(preds, targets))
+        wandb.log({'Preficted text': table})
+
+        for n_components in [2, 5, 30, 50, 100]:
+            tsne = TSNE(n_components=n_components, random_state=123)
+            z = tsne.fit_transform(latents)
+            table = wandb.Table(data=z, columns = ["z_0", "z_1"])
+            # TODO log row `label` with scatter values, should see unsupervised classification
+            wandb.log({f"latent t-sne {n_components} components" : wandb.plots.scatter(table, "z_0", "z_1", title="T-SNE On latent codes.")})
+
+        # TODO n principle components per hidden state (across layers)
+        # through the model its principle components should change.
+        # it should get more variation across layers
+        # n_princicple components should increase?
+        explained_variances = []
+        for hidden in hidden_states:
+            pca = PCA()
+            pca.fit_transform(hidden.view(-1, hidden.shape[-1]))
+            pca.explained_variance_.sort()
+            exp_variance = pca.explained_variance_[::-1].tolist()
+            explained_variances.append(exp_variance)
+
+        wandb.log({"PCA component explained variance per hidden state." : wandb.plot.line_series(
+                xs=range(len(hidden.shape[-1])),
+                ys=explained_variances,
+                keys=[f'l_{i}' for i in range(len(hidden_states))],
+                title="Latent values per dimension.",
+                xname="component")})
+
+        # plot latents, expect gaussian distributions across samples and dimensions
+        flat_latents = latents.view(-1, latents.shape[-1])
+        bins = torch.linspace(-1,1,21)
+        n_dims = latents.shape[1]
+        n_rows = latents.shape[0]
+
+        wandb.log({"Latent values per dimension." : wandb.plot.line_series(
+                xs=torch.linspace(-1,1,20),
+                ys=[
+                    torch.histogram(flat_latents[:,i], bins).hist for i in range(n_dims)
+                ],
+                keys=[f'z_{i}' for i in range(n_dims)],
+                title="Latent values per dimension.",
+                xname="latent value")})
+        wandb.log({"Latent values per sample." : wandb.plot.line_series(
+                xs=torch.linspace(-1,1,20),
+                ys=[
+                    torch.histogram(flat_latents[i,:], bins).hist for i in range(n_rows)
+                ],
+                keys=[f's_{i}' for i in range(latents.shape[0])],
+                title="Latent values per sample.",
+                xname="latent value")})
 
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
