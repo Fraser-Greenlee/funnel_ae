@@ -83,6 +83,7 @@ class AeTrainer(Trainer):
                 output_hidden_states=True,
                 return_dict=True,
             ))
+            inputs = self._prepare_inputs(inputs)
             outputs = model(**inputs)
 
             if logits is None:
