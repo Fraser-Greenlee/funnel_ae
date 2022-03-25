@@ -205,6 +205,4 @@ class AeTrainer(Trainer):
         self.plot_pca(hidden_states)
         self.plot_latents(latent_tokens)
 
-        breakpoint()
-
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
