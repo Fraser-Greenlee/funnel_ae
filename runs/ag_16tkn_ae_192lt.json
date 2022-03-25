@@ -13,6 +13,7 @@
     "eval_steps": 1000,
     "evaluation_strategy": "steps",
     "do_train": true,
+    "do_eval": false,
     "report_to": "wandb",
     "overwrite_output_dir": true,
     "output_dir": "/content/drive/MyDrive/output/ag_16tkn_ae_192lt",
