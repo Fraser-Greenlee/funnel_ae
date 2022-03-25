@@ -92,9 +92,9 @@ class AeTrainer(Trainer):
                 logits = torch.concat((logits, outputs.logits.detach().cpu()))
 
             if input_ids is None:
-                input_ids = inputs['input_ids'].cpu()
+                input_ids = inputs['input_ids'].detach().cpu()
             else:
-                input_ids = torch.concat((input_ids, inputs['input_ids']))
+                input_ids = torch.concat((input_ids, inputs['input_ids'].detach().cpu()))
 
             if hidden_states is None:
                 hidden_states = [v.detach().cpu() for v in outputs.hidden_states]
