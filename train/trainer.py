@@ -58,6 +58,14 @@ class AeTrainer(Trainer):
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     def _enc_dataset(self, model, dataloader):
+
+        logger.info(f"***** Running Encoding *****")
+        if has_length(dataloader.dataset):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+        logger.info(f"  Batch size = {dataloader.batch_size}")
+
         input_ids, logits, hidden_states = None, None, None
         observed_num_examples = 0
         # Main evaluation loop
@@ -68,9 +76,6 @@ class AeTrainer(Trainer):
             observed_batch_size = find_batch_size(inputs)
             if observed_batch_size is not None:
                 observed_num_examples += observed_batch_size
-                # For batch samplers, batch_size is not known by the dataloader in advance.
-                if batch_size is None:
-                    batch_size = observed_batch_size
 
             # Prediction step
             inputs.update(dict(
@@ -123,60 +128,65 @@ class AeTrainer(Trainer):
                 xs=range(d_model),
                 ys=hidden_exp_variances,
                 keys=[f'layer_{i}' for i in range(len(hidden_exp_variances))],
-                title="PCA component explained variance per layer.",
+                title="PCA component explained variance per hidden token.",
                 xname="component")})
 
         wandb.log({"PCA component explained variance per latent token." : wandb.plot.line_series(
                 xs=range(d_latent),
                 ys=latent_exp_variances,
                 keys=[f'latent_{i}' for i in range(len(latent_exp_variances))],
-                title="PCA component explained variance per layer.",
+                title="PCA component explained variance per latent token.",
                 xname="component")})
 
     def plot_latents(self, latent_tokens):
         # expect gaussian distributions across samples and dimensions
-        d_latent = latent_tokens.shape[-1]
-        n_rows = latent_tokens.shape[0]
-
-        for perplexity in [2, 5, 30, 50, 100]:
+        to_log = {}
+        for perplexity in tqdm([2, 5, 30, 50, 100], desc='t-sne'):
             tsne = TSNE(perplexity=perplexity, random_state=123, init='pca', learning_rate='auto')
             z = tsne.fit_transform(latent_tokens)
             table = wandb.Table(data=z, columns = ["z_0", "z_1"])
             # TODO log row `label` with scatter values, should see unsupervised classification
-            wandb.log({f"latent t-sne {perplexity} perplexity" : wandb.plot.scatter(table, "z_0", "z_1", title=f"T-SNE latent token {perplexity} perplexity.")})
+            to_log[f"latent t-sne {perplexity} perplexity"] = wandb.plot.scatter(table, "z_0", "z_1", title=f"T-SNE latent token {perplexity} perplexity.")
+        wandb.log(to_log)
 
-        bins = torch.linspace(-1,1,21)
+        lt_min, lt_max = latent_tokens.min(), latent_tokens.max()
+        lt_max = (lt_max + (1 if lt_max.item() > 0 else -1)).int().item()
+        lt_min = (lt_min + (1 if lt_min.item() > 0 else -1)).int().item()
+        bins = torch.linspace(lt_min, lt_max, (abs(lt_max) + abs(lt_min)) * 10+1)
 
-        wandb.log({"Latent values per dimension." : wandb.plot.line_series(
-                xs=torch.linspace(-1,1,20),
-                ys=[
-                    torch.histogram(latent_tokens[:,i], bins).hist for i in range(d_latent)
-                ],
-                keys=[f'z_{i}' for i in range(d_latent)],
-                title="Latent values per dimension.",
+        def _hist(hidden):
+            hist = torch.histogram(hidden, bins).hist
+            return hist/hist.sum()
+
+        latent_hist = _hist(latent_tokens)
+        ideal_hist = _hist(torch.randn_like(latent_tokens))
+
+        wandb.log({"Latent values." : wandb.plot.line_series(
+                xs=bins,
+                ys=[latent_hist, ideal_hist],
+                keys=['z', 'ideal'],
+                title="Latent token sample values.",
                 xname="latent value")})
 
-        wandb.log({"Latent values per sample." : wandb.plot.line_series(
-                xs=torch.linspace(-1,1,20),
-                ys=[
-                    torch.histogram(latent_tokens[i,:], bins).hist for i in range(n_rows)
+        dims = []
+        for z_i in range(latent_tokens.shape[-1]):
+            z_hist = _hist(latent_tokens[:,z_i])
+            delta = (z_hist - latent_hist).abs().sum()
+            dims.append((delta.item(), z_i, z_hist))
+        worst_dims = sorted(dims)[::-1][:10]
+
+        wandb.log({"Latent token dimension values." : wandb.plot.line_series(
+                xs=bins,
+                ys=[latent_hist] + [
+                    z_hist for (_delta, z_i, z_hist) in worst_dims
                 ],
-                keys=[f's_{i}' for i in range(n_rows)],
-                title="Latent values per sample.",
+                keys=['z_total'] + [f'z_{z_i}' for (_delta, z_i, z_hist) in worst_dims],
+                title="Latent token dimension values (+ 10 most unusual).",
                 xname="latent value")})
 
     def evaluate(self, eval_dataset: Optional[Dataset] = None, ignore_keys: Optional[List[str]] = None, metric_key_prefix: str = "eval") -> Dict[str, float]:
 
         dataloader = self.get_eval_dataloader(eval_dataset)
-        batch_size = dataloader.batch_size
-
-        logger.info(f"***** Running Encoding *****")
-        if has_length(dataloader.dataset):
-            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
-        else:
-            logger.info("  Num examples: Unknown")
-        logger.info(f"  Batch size = {batch_size}")
-
         model = self._wrap_model(self.model, training=False)
         model.eval()
 
@@ -185,11 +195,12 @@ class AeTrainer(Trainer):
         preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
         targets = self.tokenizer.batch_decode(input_ids)
         table = wandb.Table(columns=['prediction', 'target'], data=list(zip(preds, targets)))
-        wandb.log({'Preficted text': table})
+        wandb.log({'Predicted text': table})
 
         # TODO have model learn to predict latent feature based on surrounding features.
         # Have a seperate linear layer to predict each latent feature
-        # Would be great to be able to counter for consistancies in the dataset
+        # Would be great to be able to counter for consistancies in the dataset?
+        # Could have an embedding -> pred model to counter for dataset distribution?
 
         self.plot_pca(hidden_states)
         self.plot_latents(latent_tokens)
