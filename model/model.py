@@ -507,8 +507,8 @@ class FunnelAeForMaskedLM(FunnelForMaskedLM):
 
         if reg_loss is not None and masked_lm_loss is not None and reg_loss is not None:
             if self.training:
-                self.tr_masked_lm_loss += masked_lm_loss
-                self.tr_reg_loss += reg_loss
+                self.tr_masked_lm_loss += masked_lm_loss.item()
+                self.tr_reg_loss += reg_loss.item()
             masked_lm_loss += reg_loss
 
         if not return_dict:
