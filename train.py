@@ -4,7 +4,7 @@ Fine-tuning the library models for language autoencoding on a text file or a dat
 import logging
 import math
 import os
-os.environ['WANDB_PROJECT'] = 'funnel_ae'
+os.environ['WANDB_PROJECT'] = os.getenv('WANDB_PROJECT', 'funnel_ae')
 import sys
 from dataclasses import dataclass, field
 from itertools import chain
