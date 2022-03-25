@@ -69,9 +69,10 @@ class AeTrainer(Trainer):
         input_ids, logits, hidden_states = None, None, None
         observed_num_examples = 0
         # Main evaluation loop
-        for step, inputs in tqdm(enumerate(dataloader), desc="Encode test dataset."):
-            if step > 5:
+        for step, inputs in tqdm(enumerate(dataloader), desc="Encode test dataset.", total=len(dataloader)):
+            if observed_num_examples >= 1_000:
                 break
+
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
             if observed_batch_size is not None:
