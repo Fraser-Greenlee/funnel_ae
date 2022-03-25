@@ -1,6 +1,5 @@
 import logging
 from dataclasses import dataclass
-from msilib import Table
 from typing import Dict, Optional, List
 from tqdm import tqdm
 import wandb
@@ -58,22 +57,8 @@ class AeTrainer(Trainer):
             self._save_checkpoint(model, trial, metrics=metrics)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-    def evaluate(self, eval_dataset: Optional[Dataset] = None, ignore_keys: Optional[List[str]] = None, metric_key_prefix: str = "eval") -> Dict[str, float]:
-
-        dataloader = self.get_eval_dataloader(eval_dataset)
-        batch_size = dataloader.batch_size
-
-        logger.info(f"***** Running Encoding *****")
-        if has_length(dataloader.dataset):
-            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
-        else:
-            logger.info("  Num examples: Unknown")
-        logger.info(f"  Batch size = {batch_size}")
-
-        model = self._wrap_model(self.model, training=False)
-        model.eval()
-
-        logits, hidden_states = None, None
+    def _enc_dataset(self, model, dataloader):
+        input_ids, logits, hidden_states = None, None, None
         observed_num_examples = 0
         # Main evaluation loop
         for step, inputs in tqdm(enumerate(dataloader), desc="Encode test dataset."):
@@ -113,58 +98,102 @@ class AeTrainer(Trainer):
                 ]
 
         latents = hidden_states[1 + (torch.tensor(model.config.block_sizes) * torch.tensor(model.config.block_repeats)).sum()]
+        latent_tokens = latents.view(-1, latents.shape[-1])
 
-        breakpoint()
+        return input_ids, logits, hidden_states, latent_tokens
 
-        preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
-        targets = self.tokenizer.batch_decode(input_ids)
-        table = wandb.Table(columns=['prediction', 'target'], data=zip(preds, targets))
-        wandb.log({'Preficted text': table})
-
-        # TODO incorperate the dataset `label` field if present.
-        for n_components in [2, 5, 30, 50, 100]:
-            tsne = TSNE(n_components=n_components, random_state=123)
-            z = tsne.fit_transform(latents)
-            table = wandb.Table(data=z, columns = ["z_0", "z_1"])
-            # TODO log row `label` with scatter values, should see unsupervised classification
-            wandb.log({f"latent t-sne {n_components} components" : wandb.plots.scatter(table, "z_0", "z_1", title="T-SNE On latent codes.")})
-
-        explained_variances = []
-        for hidden in hidden_states:
+    def plot_pca(self, hidden_states):
+        hidden_exp_variances = []
+        latent_exp_variances = []
+        d_model = self.model.config.d_model
+        d_latent = self.model.config.d_latent
+        for hidden_layer in hidden_states:
             pca = PCA()
-            pca.fit_transform(hidden.view(-1, hidden.shape[-1]))
+            pca.fit_transform(hidden_layer.view(-1, hidden_layer.shape[-1]))
             pca.explained_variance_.sort()
             exp_variance = pca.explained_variance_[::-1].tolist()
-            explained_variances.append(exp_variance)
+            if hidden_layer.shape[-1] == d_model:
+                hidden_exp_variances.append(exp_variance)
+            elif hidden_layer.shape[-1] == d_latent:
+                latent_exp_variances.append(exp_variance)
+            else:
+                raise Exception('Bad hidden shape.')
 
-        wandb.log({"PCA component explained variance per hidden state." : wandb.plot.line_series(
-                xs=range(len(hidden.shape[-1])),
-                ys=explained_variances,
-                keys=[f'l_{i}' for i in range(len(hidden_states))],
-                title="Latent values per dimension.",
+        wandb.log({"PCA component explained variance per hidden token." : wandb.plot.line_series(
+                xs=range(d_model),
+                ys=hidden_exp_variances,
+                keys=[f'layer_{i}' for i in range(len(hidden_exp_variances))],
+                title="PCA component explained variance per layer.",
                 xname="component")})
 
-        # plot latents, expect gaussian distributions across samples and dimensions
-        flat_latents = latents.view(-1, latents.shape[-1])
+        wandb.log({"PCA component explained variance per latent token." : wandb.plot.line_series(
+                xs=range(d_latent),
+                ys=latent_exp_variances,
+                keys=[f'latent_{i}' for i in range(len(latent_exp_variances))],
+                title="PCA component explained variance per layer.",
+                xname="component")})
+
+    def plot_latents(self, latent_tokens):
+        # expect gaussian distributions across samples and dimensions
+        d_latent = latent_tokens.shape[-1]
+        n_rows = latent_tokens.shape[0]
+
+        for perplexity in [2, 5, 30, 50, 100]:
+            tsne = TSNE(perplexity=perplexity, random_state=123, init='pca', learning_rate='auto')
+            z = tsne.fit_transform(latent_tokens)
+            table = wandb.Table(data=z, columns = ["z_0", "z_1"])
+            # TODO log row `label` with scatter values, should see unsupervised classification
+            wandb.log({f"latent t-sne {perplexity} perplexity" : wandb.plot.scatter(table, "z_0", "z_1", title=f"T-SNE latent token {perplexity} perplexity.")})
+
         bins = torch.linspace(-1,1,21)
-        n_dims = latents.shape[1]
-        n_rows = latents.shape[0]
 
         wandb.log({"Latent values per dimension." : wandb.plot.line_series(
                 xs=torch.linspace(-1,1,20),
                 ys=[
-                    torch.histogram(flat_latents[:,i], bins).hist for i in range(n_dims)
+                    torch.histogram(latent_tokens[:,i], bins).hist for i in range(d_latent)
                 ],
-                keys=[f'z_{i}' for i in range(n_dims)],
+                keys=[f'z_{i}' for i in range(d_latent)],
                 title="Latent values per dimension.",
                 xname="latent value")})
+
         wandb.log({"Latent values per sample." : wandb.plot.line_series(
                 xs=torch.linspace(-1,1,20),
                 ys=[
-                    torch.histogram(flat_latents[i,:], bins).hist for i in range(n_rows)
+                    torch.histogram(latent_tokens[i,:], bins).hist for i in range(n_rows)
                 ],
-                keys=[f's_{i}' for i in range(latents.shape[0])],
+                keys=[f's_{i}' for i in range(n_rows)],
                 title="Latent values per sample.",
                 xname="latent value")})
+
+    def evaluate(self, eval_dataset: Optional[Dataset] = None, ignore_keys: Optional[List[str]] = None, metric_key_prefix: str = "eval") -> Dict[str, float]:
+
+        dataloader = self.get_eval_dataloader(eval_dataset)
+        batch_size = dataloader.batch_size
+
+        logger.info(f"***** Running Encoding *****")
+        if has_length(dataloader.dataset):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+        logger.info(f"  Batch size = {batch_size}")
+
+        model = self._wrap_model(self.model, training=False)
+        model.eval()
+
+        input_ids, logits, hidden_states, latent_tokens = self._enc_dataset(model, dataloader)
+
+        preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
+        targets = self.tokenizer.batch_decode(input_ids)
+        table = wandb.Table(columns=['prediction', 'target'], data=list(zip(preds, targets)))
+        wandb.log({'Preficted text': table})
+
+        # TODO have model learn to predict latent feature based on surrounding features.
+        # Have a seperate linear layer to predict each latent feature
+        # Would be great to be able to counter for consistancies in the dataset
+
+        self.plot_pca(hidden_states)
+        self.plot_latents(latent_tokens)
+
+        breakpoint()
 
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
