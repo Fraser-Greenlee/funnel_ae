@@ -1,64 +1,33 @@
-from typing import Dict
+import logging
+from dataclasses import dataclass
+from typing import Dict, Optional, List
+from tqdm import tqdm
+import wandb
 import torch
-from torch import nn
-from dataclasses import dataclass, field
-from transformers.trainer import Trainer, is_torch_tpu_available, get_parameter_names, ShardedDDPOption, is_sagemaker_mp_enabled
+from torch.utils.data import Dataset
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+from transformers.trainer import Trainer
+from transformers.trainer_utils import has_length
+from transformers.trainer_pt_utils import find_batch_size
 from transformers.training_args import TrainingArguments
+from transformers.utils import logging
+
+
+logger = logging.get_logger(__name__)
 
 
 @dataclass
 class AeTrainingArguments(TrainingArguments):
-    skip_con_args: str = field(default=None, metadata={"help": "Args for skip connections, one per block, (k, b), 'no' to not use connection. See https://www.desmos.com/calculator/qcl82whtzo"})
-    dont_train_encoder: bool = field(default=False, metadata={"help": "Don't optimize encoder parameters."})
-    gradually_add_blocks: bool = field(default=False, metadata={"help": "Start by optimizing inner blocks, gradually adding outer blocks as loss lowers."})
-    add_blocks_from_outer: bool = field(default=False, metadata={"help": "Switch to optimizing inner outer."})
-    add_block_min_eval_loss: float = field(default=10.0, metadata={"help": "Min eval loss to add a block."})
-
     def __post_init__(self):
-        super().__post_init__()
-        if self.skip_con_args:
-            skip_args = []
-            for str_args in self.skip_con_args.split(','):
-                if str_args == "no":
-                    skip_args.append((None, None))
-                else:
-                    skip_args.append([float(v) for v in str_args.split()])
-            self.skip_con_args = skip_args
-        else:
-            self.skip_con_args = None
+        if self.output_dir and not torch.cuda.is_available():
+            self.output_dir = 'test'
+        return super().__post_init__()
 
 
 class AeTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.args.skip_con_args:
-            assert len(self.model.config.block_sizes) == len(self.args.skip_con_args)
-
-    def _skip_connection_weights(self):
-        weights = []
-        for (k, b) in self.args.skip_con_args:
-            if k is None:
-                weights.append(0.0)
-            else:
-                weights.append(
-                    torch.sigmoid(
-                        torch.tensor(b - self.state.global_step * k)
-                    )
-                )
-        return torch.tensor(weights)
-
-    def compute_loss(self, model, inputs, return_outputs=False):
-        if self.args.skip_con_args and type(self.state.global_step) is int:
-            model.funnel.decoder.skip_w = self._skip_connection_weights()
-        return super().compute_loss(model, inputs, return_outputs=return_outputs)
-
     def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
-        '''
-            Adds logging `skip_con_{i}`
-        '''
         if self.control.should_log:
-            if is_torch_tpu_available():
-                raise NotImplementedError()
 
             logs: Dict[str, float] = {}
 
@@ -70,14 +39,8 @@ class AeTrainer(Trainer):
 
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
             logs["learning_rate"] = self._get_learning_rate()
-
-            if self.args.skip_con_args:
-                skip_weights = model.funnel.decoder.skip_w.tolist()
-                for i, weight in enumerate(skip_weights):
-                    logs[f"skip_con_{i}"] = weight
-
-            if self.args.gradually_add_blocks:
-                logs["n_blocks"] = self.model.funnel.n_blocks()
+            logs['masked_lm_loss'] = round(model.get_masked_lm_loss() / (self.state.global_step - self._globalstep_last_logged), 4)
+            logs['reg_loss'] = round(model.get_reg_loss() / (self.state.global_step - self._globalstep_last_logged), 4)
 
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
@@ -88,54 +51,160 @@ class AeTrainer(Trainer):
         metrics = None
         if self.control.should_evaluate:
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
-
-            if self.args.gradually_add_blocks and len(self.model.funnel.encoder_held_out_blocks) > 0 and metrics['loss'] < self.args.add_block_min_eval_loss:
-                n = - self.model.funnel.n_blocks()
-                if self.args.add_blocks_from_outer:
-                    n *= -1
-                self.model.funnel.cut_to_n_blocks(n)
-
             self._report_to_hp_search(trial, epoch, metrics)
 
         if self.control.should_save:
             self._save_checkpoint(model, trial, metrics=metrics)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-    def create_optimizer(self):
-        """
-        Setup the optimizer.
+    def _enc_dataset(self, model, dataloader):
 
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through `optimizers`, or subclass and override this method in a subclass.
-        """
-        if self.optimizer is None:
-            decay_parameters = get_parameter_names(self.model, [nn.LayerNorm])
-            decay_parameters = [name for name in decay_parameters if "bias" not in name]
+        logger.info(f"***** Running Encoding *****")
+        if has_length(dataloader.dataset):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+        logger.info(f"  Batch size = {dataloader.batch_size}")
 
-            # allow not training encoder
-            model_parameters = [(n, p) for n,p in self.model.named_parameters()]
-            if self.args.dont_train_encoder:
-                model_parameters = [(n, p) for n,p in model_parameters if 'encoder' not in n]
+        input_ids, logits, hidden_states = None, None, None
+        observed_num_examples = 0
+        # Main evaluation loop
+        for step, inputs in tqdm(enumerate(dataloader), desc="Encode test dataset.", total=len(dataloader)):
+            if observed_num_examples >= 1_000:
+                break
 
-            optimizer_grouped_parameters = [
-                {
-                    "params": [p for n, p in model_parameters if n in decay_parameters],
-                    "weight_decay": self.args.weight_decay,
-                },
-                {
-                    "params": [p for n, p in model_parameters if n not in decay_parameters],
-                    "weight_decay": 0.0,
-                },
-            ]
+            # Update the observed num examples
+            observed_batch_size = find_batch_size(inputs)
+            if observed_batch_size is not None:
+                observed_num_examples += observed_batch_size
 
-            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+            # Prediction step
+            inputs.update(dict(
+                output_attentions=False, # TODO could probably use the attention pattern
+                output_hidden_states=True,
+                return_dict=True,
+            ))
+            inputs = self._prepare_inputs(inputs)
+            outputs = model(**inputs)
 
-            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
-                raise NotImplementedError()
+            if logits is None:
+                logits = outputs.logits.detach().cpu()
             else:
-                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+                logits = torch.concat((logits, outputs.logits.detach().cpu()))
 
-        if is_sagemaker_mp_enabled():
-            raise NotImplementedError()
+            if input_ids is None:
+                input_ids = inputs['input_ids'].detach().cpu()
+            else:
+                input_ids = torch.concat((input_ids, inputs['input_ids'].detach().cpu()))
 
-        return self.optimizer
+            if hidden_states is None:
+                hidden_states = [v.detach().cpu() for v in outputs.hidden_states]
+            else:
+                hidden_states = [
+                    torch.concat((v, outputs.hidden_states[i].detach().cpu())) for i, v in enumerate(hidden_states)
+                ]
+
+        latents = hidden_states[1 + (torch.tensor(model.config.block_sizes) * torch.tensor(model.config.block_repeats)).sum()]
+        latent_tokens = latents.view(-1, latents.shape[-1])
+
+        return input_ids, logits, hidden_states, latent_tokens
+
+    def plot_pca(self, hidden_states):
+        hidden_exp_variances = []
+        latent_exp_variances = []
+        d_model = self.model.config.d_model
+        d_latent = self.model.config.d_latent
+        for hidden_layer in hidden_states:
+            pca = PCA()
+            pca.fit_transform(hidden_layer.view(-1, hidden_layer.shape[-1]))
+            pca.explained_variance_.sort()
+            exp_variance = pca.explained_variance_[::-1].tolist()
+            if hidden_layer.shape[-1] == d_model:
+                hidden_exp_variances.append(exp_variance)
+            elif hidden_layer.shape[-1] == d_latent:
+                latent_exp_variances.append(exp_variance)
+            else:
+                raise Exception('Bad hidden shape.')
+
+        wandb.log({"PCA component explained variance per hidden token." : wandb.plot.line_series(
+                xs=range(d_model),
+                ys=hidden_exp_variances,
+                keys=[f'layer_{i}' for i in range(len(hidden_exp_variances))],
+                title="PCA component explained variance per hidden token.",
+                xname="component")})
+
+        wandb.log({"PCA component explained variance per latent token." : wandb.plot.line_series(
+                xs=range(d_latent),
+                ys=latent_exp_variances,
+                keys=[f'latent_{i}' for i in range(len(latent_exp_variances))],
+                title="PCA component explained variance per latent token.",
+                xname="component")})
+
+    def plot_latents(self, latent_tokens):
+        # expect gaussian distributions across samples and dimensions
+        to_log = {}
+        for perplexity in tqdm([2, 5, 30, 50, 100], desc='t-sne'):
+            tsne = TSNE(perplexity=perplexity, random_state=123, init='pca', learning_rate='auto')
+            z = tsne.fit_transform(latent_tokens)
+            table = wandb.Table(data=z, columns = ["z_0", "z_1"])
+            # TODO log row `label` with scatter values, should see unsupervised classification
+            to_log[f"latent t-sne {perplexity} perplexity"] = wandb.plot.scatter(table, "z_0", "z_1", title=f"T-SNE latent token {perplexity} perplexity.")
+        wandb.log(to_log)
+
+        lt_min, lt_max = latent_tokens.min(), latent_tokens.max()
+        lt_max = (lt_max + (1 if lt_max.item() > 0 else -1)).int().item()
+        lt_min = (lt_min + (1 if lt_min.item() > 0 else -1)).int().item()
+        bins = torch.linspace(lt_min, lt_max, (abs(lt_max) + abs(lt_min)) * 10+1)
+
+        def _hist(hidden):
+            hist = torch.histogram(hidden, bins).hist
+            return hist/hist.sum()
+
+        latent_hist = _hist(latent_tokens)
+        ideal_hist = _hist(torch.randn_like(latent_tokens))
+
+        wandb.log({"Latent values." : wandb.plot.line_series(
+                xs=bins,
+                ys=[latent_hist, ideal_hist],
+                keys=['z', 'ideal'],
+                title="Latent token sample values.",
+                xname="latent value")})
+
+        dims = []
+        for z_i in range(latent_tokens.shape[-1]):
+            z_hist = _hist(latent_tokens[:,z_i])
+            delta = (z_hist - latent_hist).abs().sum()
+            dims.append((delta.item(), z_i, z_hist))
+        worst_dims = sorted(dims)[::-1][:10]
+
+        wandb.log({"Latent token dimension values." : wandb.plot.line_series(
+                xs=bins,
+                ys=[latent_hist] + [
+                    z_hist for (_delta, z_i, z_hist) in worst_dims
+                ],
+                keys=['z_total'] + [f'z_{z_i}' for (_delta, z_i, z_hist) in worst_dims],
+                title="Latent token dimension values (+ 10 most unusual).",
+                xname="latent value")})
+
+    def evaluate(self, eval_dataset: Optional[Dataset] = None, ignore_keys: Optional[List[str]] = None, metric_key_prefix: str = "eval") -> Dict[str, float]:
+
+        dataloader = self.get_eval_dataloader(eval_dataset)
+        model = self._wrap_model(self.model, training=False)
+        model.eval()
+
+        input_ids, logits, hidden_states, latent_tokens = self._enc_dataset(model, dataloader)
+
+        preds = self.tokenizer.batch_decode(logits.max(dim=2).indices)
+        targets = self.tokenizer.batch_decode(input_ids)
+        table = wandb.Table(columns=['prediction', 'target'], data=list(zip(preds, targets)))
+        wandb.log({'Predicted text': table})
+
+        # TODO have model learn to predict latent feature based on surrounding features.
+        # Have a seperate linear layer to predict each latent feature
+        # Would be great to be able to counter for consistancies in the dataset?
+        # Could have an embedding -> pred model to counter for dataset distribution?
+
+        self.plot_pca(hidden_states)
+        self.plot_latents(latent_tokens)
+
+        return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)

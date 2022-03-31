@@ -4,7 +4,7 @@ Fine-tuning the library models for language autoencoding on a text file or a dat
 import logging
 import math
 import os
-os.environ['WANDB_PROJECT'] = 'funnel_ae'
+os.environ['WANDB_PROJECT'] = os.getenv('WANDB_PROJECT', 'funnel_ae')
 import sys
 from dataclasses import dataclass, field
 from itertools import chain
@@ -490,13 +490,6 @@ def main():
 
     # Training
     if training_args.do_train:
-
-        if training_args.gradually_add_blocks:
-            if training_args.add_blocks_from_outer:
-                model.funnel.cut_to_n_blocks(1)
-            else:
-                model.funnel.cut_to_n_blocks(-1)
-
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
@@ -518,9 +511,6 @@ def main():
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-
-        if training_args.gradually_add_blocks:
-            model.funnel.cut_to_n_blocks(0)
 
         metrics = trainer.evaluate()
 
