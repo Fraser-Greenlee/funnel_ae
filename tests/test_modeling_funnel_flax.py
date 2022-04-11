@@ -22,3 +22,7 @@ class Basics(unittest.TestCase):
         variables = emb.init(rng, input_ids)
         embeddings = emb.apply(variables, input_ids)
         self.assertEqual(embeddings.shape, (1, input_ids.shape[-1], config.d_model))
+
+    def test_attn_struct_run_default(self):
+        config = FunnelConfig()
+        attention_structure = FunnelAttentionStructure(config)

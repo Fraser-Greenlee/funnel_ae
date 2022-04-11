@@ -37,17 +37,12 @@ class FunnelAttentionStructure(nn.Module):
     """
     Contains helpers for `FunnelRelMultiheadAttention `.
     """
-
+    config: FunnelConfig
     cls_token_type_id: int = 2
 
-    def __init__(self, config: FunnelConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.sin_dropout = nn.Dropout(config.hidden_dropout)
-        self.cos_dropout = nn.Dropout(config.hidden_dropout)
-        # Track where we are at in terms of pooling from the original input, e.g., by how much the sequence length was
-        # divided.
-        self.pooling_mult = None
+    def setup(self):
+        self.sin_dropout = nn.Dropout(self.config.hidden_dropout)
+        self.cos_dropout = nn.Dropout(self.config.hidden_dropout)
 
     def init_attention_inputs(
         self,
@@ -58,7 +53,6 @@ class FunnelAttentionStructure(nn.Module):
         """Returns the attention inputs associated to the inputs of the model."""
         # inputs_embeds has shape batch_size x seq_len x d_model
         # attention_mask and token_type_ids have shape batch_size x seq_len
-        self.pooling_mult = 1
         self.seq_len = seq_len = inputs_embeds.size(1)
         position_embeds = self.get_position_embeds(seq_len, inputs_embeds.dtype, inputs_embeds.device)
         token_type_mat = self.token_type_ids_to_mat(token_type_ids) if token_type_ids is not None else None
@@ -272,7 +266,6 @@ class FunnelAttentionStructure(nn.Module):
             cls_mask = self.stride_pool(cls_mask, 0)
             output = self.pool_tensor(output, mode=self.config.pooling_type)
         else:
-            self.pooling_mult *= 2
             if self.config.attention_type == "factorized":
                 position_embeds = self.stride_pool(position_embeds, 0)
             token_type_mat = self.stride_pool(token_type_mat, [1, 2])
@@ -286,7 +279,6 @@ class FunnelAttentionStructure(nn.Module):
         """Pool the proper parts of `attention_inputs` after the attention layer."""
         position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
         if self.config.pool_q_only:
-            self.pooling_mult *= 2
             if self.config.attention_type == "factorized":
                 position_embeds = position_embeds[:2] + self.stride_pool(position_embeds[2:], 0)
             token_type_mat = self.stride_pool(token_type_mat, 2)
@@ -294,3 +286,164 @@ class FunnelAttentionStructure(nn.Module):
             attention_mask = self.pool_tensor(attention_mask, mode="min")
         attention_inputs = (position_embeds, token_type_mat, attention_mask, cls_mask)
         return attention_inputs
+
+
+def _relative_shift_gather(positional_attn: jnp.ndarray, context_len: int, shift: int) -> jnp.ndarray:
+    batch_size, n_head, seq_len, max_rel_len = positional_attn.shape
+    # max_rel_len = 2 * context_len + shift -1 is the numbers of possible relative positions i-j
+
+    # What's next is the same as doing the following gather, which might be clearer code but less efficient.
+    # idxs = context_len + torch.arange(0, context_len).unsqueeze(0) - torch.arange(0, seq_len).unsqueeze(1)
+    # # matrix of context_len + i-j
+    # return positional_attn.gather(3, idxs.expand([batch_size, n_head, context_len, context_len]))
+
+    positional_attn = jnp.reshape(positional_attn, [batch_size, n_head, max_rel_len, seq_len])
+    positional_attn = positional_attn[:, :, shift:, :]
+    positional_attn = jnp.reshape(positional_attn, [batch_size, n_head, seq_len, max_rel_len - shift])
+    positional_attn = positional_attn[..., :context_len]
+    return positional_attn
+
+
+class FunnelRelMultiheadAttention(nn.Module):
+    config: FunnelConfig
+    block_index: int
+
+    def setup(self):
+        d_model, n_head, d_head = self.config.d_model, self.config.n_head, self.config.d_head
+
+        self.hidden_dropout = nn.Dropout(self.config.hidden_dropout)
+        self.attention_dropout = nn.Dropout(self.config.attention_dropout)
+
+        self.q_head = nn.Dense(n_head * d_head, bias=False)
+        self.k_head = nn.Dense(n_head * d_head)
+        self.v_head = nn.Dense(n_head * d_head)
+
+        # TODO find Jax/Flax equivalent
+        self.r_w_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
+        self.r_r_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
+        self.r_kernel =  nn.Parameter(jnp.zeros([d_model, n_head, d_head]))
+        self.r_s_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
+        self.seg_embed = nn.Parameter(jnp.zeros([2,       n_head, d_head]))
+
+        self.post_proj = nn.Dense(d_model)
+        self.layer_norm = nn.LayerNorm(d_model, eps=self.config.layer_norm_eps)
+        self.scale = 1.0 / (d_head**0.5)
+
+    def relative_positional_attention(self, position_embeds, q_head, context_len, cls_mask=None):
+        """Relative attention score for the positional encodings"""
+        # q_head has shape batch_size x sea_len x n_head x d_head
+        if self.config.attention_type == "factorized":
+            # Notations from the paper, appending A.2.2, final formula (https://arxiv.org/abs/2006.03236)
+            # phi and pi have shape seq_len x d_model, psi and omega have shape context_len x d_model
+            phi, pi, psi, omega = position_embeds
+            # Shape n_head x d_head
+            u = self.r_r_bias * self.scale
+            # Shape d_model x n_head x d_head
+            w_r = self.r_kernel
+
+            # Shape batch_size x sea_len x n_head x d_model
+            q_r_attention = jnp.einsum("binh,dnh->bind", q_head + u, w_r)
+            q_r_attention_1 = q_r_attention * phi[:, None]
+            q_r_attention_2 = q_r_attention * pi[:, None]
+
+            # Shape batch_size x n_head x seq_len x context_len
+            positional_attn = jnp.einsum("bind,jd->bnij", q_r_attention_1, psi) + jnp.einsum(
+                "bind,jd->bnij", q_r_attention_2, omega
+            )
+        else:
+            shift = 2 if q_head.shape[1] != context_len else 1
+            # Notations from the paper, appending A.2.1, final formula (https://arxiv.org/abs/2006.03236)
+            # Grab the proper positional encoding, shape max_rel_len x d_model
+            r = position_embeds[self.block_index][shift - 1]
+            # Shape n_head x d_head
+            v = self.r_r_bias * self.scale
+            # Shape d_model x n_head x d_head
+            w_r = self.r_kernel
+
+            # Shape max_rel_len x n_head x d_model
+            r_head = jnp.einsum("td,dnh->tnh", r, w_r)
+            # Shape batch_size x n_head x seq_len x max_rel_len
+            positional_attn = jnp.einsum("binh,tnh->bnit", q_head + v, r_head)
+            # Shape batch_size x n_head x seq_len x context_len
+            positional_attn = _relative_shift_gather(positional_attn, context_len, shift)
+
+        if cls_mask is not None:
+            positional_attn *= cls_mask
+        return positional_attn
+
+    def relative_token_type_attention(self, token_type_mat, q_head, cls_mask=None):
+        """Relative attention score for the token_type_ids"""
+        if token_type_mat is None:
+            return 0
+        batch_size, seq_len, context_len = token_type_mat.shape
+        # q_head has shape batch_size x seq_len x n_head x d_head
+        # Shape n_head x d_head
+        r_s_bias = self.r_s_bias * self.scale
+
+        # Shape batch_size x n_head x seq_len x 2
+        token_type_bias = jnp.einsum("bind,snd->bnis", q_head + r_s_bias, self.seg_embed)
+        # Shape batch_size x n_head x seq_len x context_len
+        token_type_mat = token_type_mat[:, None].expand([batch_size, q_head.shape[2], seq_len, context_len])
+        # Shapes batch_size x n_head x seq_len
+        diff_token_type, same_token_type = jnp.split(token_type_bias, 1, dim=-1)
+        # Shape batch_size x n_head x seq_len x context_len
+        token_type_attn = jnp.where(
+            token_type_mat, same_token_type.expand(token_type_mat.shape), diff_token_type.expand(token_type_mat.shape)
+        )
+
+        if cls_mask is not None:
+            token_type_attn *= cls_mask
+        return token_type_attn
+
+    def __call__(
+        self,
+        query: jnp.ndarray,
+        key: jnp.ndarray,
+        value: jnp.ndarray,
+        attention_inputs: Tuple[jnp.ndarray],
+        output_attentions: bool = False,
+    ) -> Tuple[jnp.ndarray, ...]:
+        # query has shape batch_size x seq_len x d_model
+        # key and value have shapes batch_size x context_len x d_model
+        position_embeds, token_type_mat, attention_mask, cls_mask = attention_inputs
+
+        batch_size, seq_len, _ = query.shape
+        context_len = key.shape[1]
+        n_head, d_head = self.config.n_head, self.config.d_head
+
+        # Shape batch_size x seq_len x n_head x d_head
+        q_head = self.q_head(query).view(batch_size, seq_len, n_head, d_head)
+        # Shapes batch_size x context_len x n_head x d_head
+        k_head = self.k_head(key).view(batch_size, context_len, n_head, d_head)
+        v_head = self.v_head(value).view(batch_size, context_len, n_head, d_head)
+
+        q_head = q_head * self.scale
+        # Shape n_head x d_head
+        r_w_bias = self.r_w_bias * self.scale
+        # Shapes batch_size x n_head x seq_len x context_len
+        content_score = jnp.einsum("bind,bjnd->bnij", q_head + r_w_bias, k_head)
+        positional_attn = self.relative_positional_attention(position_embeds, q_head, context_len, cls_mask)
+        token_type_attn = self.relative_token_type_attention(token_type_mat, q_head, cls_mask)
+
+        # merge attention scores
+        attn_score = content_score + positional_attn + token_type_attn
+
+        # precision safe in case of mixed precision training
+        dtype = attn_score.dtype
+        attn_score = attn_score.float()
+        # perform masking
+        if attention_mask is not None:
+            attn_score = attn_score - INF * (1 - attention_mask[:, None, None].float())
+        # attention probability
+        attn_prob = jax.nn.softmax(attn_score, axis=-1)
+        attn_prob = self.attention_dropout(attn_prob)
+
+        # attention output, shape batch_size x seq_len x n_head x d_head
+        attn_vec = jnp.einsum("bnij,bjnd->bind", attn_prob, v_head)
+
+        # Shape shape batch_size x seq_len x d_model
+        attn_out = self.post_proj(attn_vec.reshape(batch_size, seq_len, n_head * d_head))
+        attn_out = self.hidden_dropout(attn_out)
+
+        output = self.layer_norm(query + attn_out)
+        return (output, attn_prob) if output_attentions else (output,)
