@@ -58,16 +58,76 @@ class TestFunnelAttentionStructure(unittest.TestCase):
             [0.0, 1.0, 1.0, 1.0],
             [0.0, 1.0, 1.0, 1.0]])
 
-    def _test_alt(self):
-        batch_size = 2
+    def test_pre_attention_pooling(self):
+        batch_size, seq_len = 2, 4
         config = FunnelConfig()
+        inputs_embeds  = jax.random.normal(rng, (batch_size, seq_len, config.d_model))
+        attention_mask = jnp.array([ [1,1,1,0], [1,1,1,1] ])
+        token_type_ids = jnp.array([ [2,1,1,1], [2,2,1,1] ])
         attention_structure = FunnelAttentionStructure(config)
-        attn_shape = (batch_size, config.d_model, config.n_head * config.d_head)
-        query = jax.random.normal(rng, attn_shape)
-        key =   jax.random.normal(rng, attn_shape)
-        value = jax.random.normal(rng, attn_shape)
-        position_embeds = jax.random.normal(rng, attn_shape)
-        token_type_mat
-        attention_mask
-        cls_mask
-        output_attentions = True
+        variables = attention_structure.init(
+            rng, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        #
+        output, new_attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_inputs, method=attention_structure.pre_attention_pooling
+        )
+        self.assertEqual(output.shape, (2, 2, 768))
+        _position_embeds, _token_type_mat, _attention_mask, _cls_mask = attention_inputs
+        position_embeds, token_type_mat, attention_mask, cls_mask = new_attention_inputs
+        self.assertEqual(position_embeds, _position_embeds)
+        self.assertEqual(token_type_mat.shape, (2, 2, 4))
+        self.assertEqual(attention_mask.shape, (2, 4))
+        self.assertEqual(cls_mask.shape, (2, 4))
+
+    def test_pre_attention_pooling_not_pool_q_only(self):
+        batch_size, seq_len = 2, 4
+        config = FunnelConfig(pool_q_only=False)
+        inputs_embeds  = jax.random.normal(rng, (batch_size, seq_len, config.d_model))
+        attention_mask = jnp.array([ [1,1,1,0], [1,1,1,1] ])
+        token_type_ids = jnp.array([ [2,1,1,1], [2,2,1,1] ])
+        attention_structure = FunnelAttentionStructure(config)
+        variables = attention_structure.init(
+            rng, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        #
+        output, new_attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_inputs, method=attention_structure.pre_attention_pooling
+        )
+        self.assertEqual(output.shape, (2, 2, 768))
+        _position_embeds, _token_type_mat, _attention_mask, _cls_mask = attention_inputs
+        position_embeds, token_type_mat, attention_mask, cls_mask = new_attention_inputs
+        self.assertEqual(position_embeds, _position_embeds)
+        self.assertEqual(token_type_mat.shape, (2, 2, 2))
+        self.assertEqual(attention_mask.shape, (2, 2))
+        self.assertEqual(cls_mask.shape, (2, 2))
+
+    def test_post_attention_pooling(self):
+        batch_size, seq_len = 2, 4
+        config = FunnelConfig()
+        inputs_embeds  = jax.random.normal(rng, (batch_size, seq_len, config.d_model))
+        attention_mask = jnp.array([ [1,1,1,0], [1,1,1,1] ])
+        token_type_ids = jnp.array([ [2,1,1,1], [2,2,1,1] ])
+        attention_structure = FunnelAttentionStructure(config)
+        variables = attention_structure.init(
+            rng, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
+        )
+        output, new_attention_inputs = attention_structure.apply(
+            variables, inputs_embeds, attention_inputs, method=attention_structure.pre_attention_pooling
+        )
+        new_new_attention_inputs = attention_structure.apply(
+            variables, new_attention_inputs, method=attention_structure.post_attention_pooling
+        )
+        position_embeds, token_type_mat, attention_mask, cls_mask = new_new_attention_inputs
+        self.assertEqual(token_type_mat.shape, (2, 2, 2))
+        self.assertEqual(attention_mask.shape, (2, 2))
+        self.assertEqual(cls_mask.shape, (2, 2))
