@@ -3,6 +3,8 @@ from typing import Optional, Tuple, Union, List
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from matplotlib.pyplot import axis
+from numpy import dtype
 
 from transformers.models.funnel.configuration_funnel import FunnelConfig
 
@@ -42,6 +44,7 @@ class FunnelAttentionStructure(nn.Module):
 
     def setup(self):
         self.sin_dropout = nn.Dropout(self.config.hidden_dropout)
+        breakpoint()
         self.cos_dropout = nn.Dropout(self.config.hidden_dropout)
 
     def init_attention_inputs(
@@ -49,16 +52,16 @@ class FunnelAttentionStructure(nn.Module):
         inputs_embeds: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
         token_type_ids: Optional[jnp.ndarray] = None,
+        deterministic: bool = True,
     ) -> Tuple[jnp.ndarray]:
         """Returns the attention inputs associated to the inputs of the model."""
         # inputs_embeds has shape batch_size x seq_len x d_model
         # attention_mask and token_type_ids have shape batch_size x seq_len
-        self.seq_len = seq_len = inputs_embeds.size(1)
-        position_embeds = self.get_position_embeds(seq_len, inputs_embeds.dtype, inputs_embeds.device)
+        seq_len = inputs_embeds.shape[1]
+        position_embeds = self.get_position_embeds(seq_len, inputs_embeds.dtype, deterministic)
         token_type_mat = self.token_type_ids_to_mat(token_type_ids) if token_type_ids is not None else None
-        # TODO does this work?
         cls_mask = (
-            nn.functional.pad(inputs_embeds.new_ones([seq_len - 1, seq_len - 1]), (1, 0, 1, 0))
+            jnp.pad(jnp.ones([seq_len - 1, seq_len - 1], dtype=inputs_embeds.dtype), (1, 0))
             if self.config.separate_cls
             else None
         )
@@ -73,7 +76,7 @@ class FunnelAttentionStructure(nn.Module):
         return cls_mat | token_type_mat
 
     def get_position_embeds(
-        self, seq_len: int, dtype: jnp.dtype
+        self, seq_len: int, dtype: jnp.dtype, deterministic: bool = True
     ) -> Union[Tuple[jnp.ndarray], List[List[jnp.ndarray]]]:
         """
         Create and cache inputs related to relative position encoding. Those are very different depending on whether we
@@ -96,14 +99,14 @@ class FunnelAttentionStructure(nn.Module):
             inv_freq = 1 / (10000 ** (freq_seq / (d_model // 2)))
             sinusoid = pos_seq[:, None] * inv_freq[None]
             sin_embed = jnp.sin(sinusoid)
-            sin_embed_d = self.sin_dropout(sin_embed)
+            sin_embed_d = self.sin_dropout(sin_embed, deterministic=deterministic)
             cos_embed = jnp.cos(sinusoid)
-            cos_embed_d = self.cos_dropout(cos_embed)
+            cos_embed_d = self.cos_dropout(cos_embed, deterministic=deterministic)
             # This is different from the formula on the paper...
-            phi = jnp.concatenate([sin_embed_d, sin_embed_d], dim=-1)
-            psi = jnp.concatenate([cos_embed, sin_embed], dim=-1)
-            pi = jnp.concatenate([cos_embed_d, cos_embed_d], dim=-1)
-            omega = jnp.concatenate([-sin_embed, cos_embed], dim=-1)
+            phi =   jnp.concatenate([sin_embed_d, sin_embed_d], axis=-1)
+            psi =   jnp.concatenate([cos_embed, sin_embed],     axis=-1)
+            pi =    jnp.concatenate([cos_embed_d, cos_embed_d], axis=-1)
+            omega = jnp.concatenate([-sin_embed, cos_embed],    axis=-1)
             return (phi, pi, psi, omega)
         else:
             # Notations from the paper, appending A.2.1, final formula.
@@ -114,9 +117,9 @@ class FunnelAttentionStructure(nn.Module):
             rel_pos_id = jnp.arange(-seq_len * 2, seq_len * 2, 1.0, dtype=dtype)
             zero_offset = seq_len * 2
             sinusoid = rel_pos_id[:, None] * inv_freq[None]
-            sin_embed = self.sin_dropout(jnp.sin(sinusoid))
-            cos_embed = self.cos_dropout(jnp.cos(sinusoid))
-            pos_embed = jnp.concatenate([sin_embed, cos_embed], dim=-1)
+            sin_embed = self.sin_dropout(jnp.sin(sinusoid), deterministic=deterministic)
+            cos_embed = self.cos_dropout(jnp.cos(sinusoid), deterministic=deterministic)
+            pos_embed = jnp.concatenate([sin_embed, cos_embed], axis=-1)
 
             pos = jnp.arange(0, seq_len, dtype=dtype)
             pooled_pos = pos
@@ -137,19 +140,16 @@ class FunnelAttentionStructure(nn.Module):
                     stride = 2 ** (block_index - 1)
                     rel_pos = self.relative_pos(pos, stride, pooled_pos, shift=2)
                     rel_pos = rel_pos[:, None] + zero_offset
-                    rel_pos = rel_pos.expand(rel_pos.size(0), d_model)
-                    # TODO try jax.lax.gather?
-                    position_embeds_pooling = torch.gather(pos_embed, 0, rel_pos)
+                    rel_pos = jnp.broadcast_to(rel_pos, (rel_pos.shape[0], d_model))
+                    position_embeds_pooling = jnp.take_along_axis(pos_embed, rel_pos, 0)
 
                 # Second type
                 pos = pooled_pos
                 stride = 2**block_index
                 rel_pos = self.relative_pos(pos, stride)
-
                 rel_pos = rel_pos[:, None] + zero_offset
-                rel_pos = rel_pos.expand(rel_pos.size(0), d_model)
-                # TODO try jax.lax.gather?
-                position_embeds_no_pooling = torch.gather(pos_embed, 0, rel_pos)
+                rel_pos = jnp.broadcast_to(rel_pos, (rel_pos.shape[0], d_model))
+                position_embeds_no_pooling = jnp.take_along_axis(pos_embed, rel_pos, 0)
 
                 position_embeds_list.append([position_embeds_no_pooling, position_embeds_pooling])
             return position_embeds_list
@@ -163,7 +163,7 @@ class FunnelAttentionStructure(nn.Module):
             # the previous block of the 1st real block. Since the 1st real
             # block always has position 1, the position of the previous block
             # will be at `1 - 2 ** block_index`.
-            cls_pos = pos_id.new_tensor([-(2**block_index) + 1])
+            cls_pos = jnp.array([-(2**block_index) + 1], dtype=pos_id.dtype)
             pooled_pos_id = pos_id[1:-1] if self.config.truncate_seq else pos_id[1:]
             return jnp.concatenate([cls_pos, pooled_pos_id[::2]], 0)
         else:
@@ -181,7 +181,7 @@ class FunnelAttentionStructure(nn.Module):
         max_dist = ref_point + num_remove * stride
         min_dist = pooled_pos[0] - pos[-1]
 
-        return jnp.arange(max_dist, min_dist - 1, -stride, dtype=jnp.int64, device=pos.device)
+        return jnp.arange(max_dist, min_dist - 1, -stride, dtype=jnp.int64)
 
     def stride_pool(
         self,
@@ -229,7 +229,7 @@ class FunnelAttentionStructure(nn.Module):
 
         if self.config.separate_cls:
             suffix = tensor[:, :-1] if self.config.truncate_seq else tensor
-            tensor = jnp.concatenate([tensor[:, :1], suffix], dim=1)
+            tensor = jnp.concatenate([tensor[:, :1], suffix], axis=1)
 
         ndim = tensor.ndim
         if ndim == 2:
@@ -384,7 +384,7 @@ class FunnelRelMultiheadAttention(nn.Module):
         # Shape batch_size x n_head x seq_len x context_len
         token_type_mat = token_type_mat[:, None].expand([batch_size, q_head.shape[2], seq_len, context_len])
         # Shapes batch_size x n_head x seq_len
-        diff_token_type, same_token_type = jnp.split(token_type_bias, 1, dim=-1)
+        diff_token_type, same_token_type = jnp.split(token_type_bias, 1, axis=-1)
         # Shape batch_size x n_head x seq_len x context_len
         token_type_attn = jnp.where(
             token_type_mat, same_token_type.expand(token_type_mat.shape), diff_token_type.expand(token_type_mat.shape)
@@ -401,6 +401,7 @@ class FunnelRelMultiheadAttention(nn.Module):
         value: jnp.ndarray,
         attention_inputs: Tuple[jnp.ndarray],
         output_attentions: bool = False,
+        deterministic: bool = True,
     ) -> Tuple[jnp.ndarray, ...]:
         # query has shape batch_size x seq_len x d_model
         # key and value have shapes batch_size x context_len x d_model
@@ -432,17 +433,17 @@ class FunnelRelMultiheadAttention(nn.Module):
         attn_score = attn_score.float()
         # perform masking
         if attention_mask is not None:
-            attn_score = attn_score - INF * (1 - attention_mask[:, None, None].float())
+            attn_score = attn_score - float("inf") * (1 - attention_mask[:, None, None].float())
         # attention probability
         attn_prob = jax.nn.softmax(attn_score, axis=-1)
-        attn_prob = self.attention_dropout(attn_prob)
+        attn_prob = self.attention_dropout(attn_prob, deterministic=deterministic)
 
         # attention output, shape batch_size x seq_len x n_head x d_head
         attn_vec = jnp.einsum("bnij,bjnd->bind", attn_prob, v_head)
 
         # Shape shape batch_size x seq_len x d_model
         attn_out = self.post_proj(attn_vec.reshape(batch_size, seq_len, n_head * d_head))
-        attn_out = self.hidden_dropout(attn_out)
+        attn_out = self.hidden_dropout(attn_out, deterministic=deterministic)
 
         output = self.layer_norm(query + attn_out)
         return (output, attn_prob) if output_attentions else (output,)
