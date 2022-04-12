@@ -44,7 +44,6 @@ class FunnelAttentionStructure(nn.Module):
 
     def setup(self):
         self.sin_dropout = nn.Dropout(self.config.hidden_dropout)
-        breakpoint()
         self.cos_dropout = nn.Dropout(self.config.hidden_dropout)
 
     def init_attention_inputs(

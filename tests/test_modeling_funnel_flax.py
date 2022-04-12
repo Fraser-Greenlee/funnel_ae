@@ -17,12 +17,20 @@ rng = jax.random.PRNGKey(0)
 
 
 class TestEmbeddings(unittest.TestCase):
-    def test_default(self):
+    def test_eval(self):
         config = FunnelConfig()
         emb = FunnelEmbeddings(config)
         variables = emb.init(rng, input_ids)
         embeddings = emb.apply(variables, input_ids)
         self.assertEqual(embeddings.shape, (1, input_ids.shape[-1], config.d_model))
+
+    def test_train(self):
+        config = FunnelConfig()
+        emb = FunnelEmbeddings(config)
+        variables = emb.init(rng, input_ids)
+        embeddings = emb.apply(variables, input_ids, deterministic=False, rngs={'dropout': rng})
+        self.assertEqual(embeddings.shape, (1, input_ids.shape[-1], config.d_model))
+
 
 class TestFunnelAttentionStructure(unittest.TestCase):
     def test_init_attention_inputs(self):
@@ -35,11 +43,20 @@ class TestFunnelAttentionStructure(unittest.TestCase):
         variables = attention_structure.init(
             rng, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
         )
-        position_embeds, token_type_mat, attention_mask, cls_mask = attention_structure.init_attention_inputs(
-            inputs_embeds, attention_mask, token_type_ids
+        position_embeds, token_type_mat, attention_mask, cls_mask = attention_structure.apply(
+            variables, inputs_embeds, attention_mask, token_type_ids, method=attention_structure.init_attention_inputs
         )
-        breakpoint()
-        x = 1
+        self.assertEqual(
+            [ll.shape if ll is not None else None for l in position_embeds for ll in l],
+            [(8, 768), None, (4, 768), (8, 768), (2, 768), (4, 768)]
+        )
+        self.assertEqual(token_type_mat.size, token_type_mat.sum())
+        self.assertEqual(attention_mask.tolist(), [[1, 1, 1, 0], [1, 1, 1, 1]])
+        self.assertEqual(cls_mask.tolist(), [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 1.0]])
 
     def _test_alt(self):
         batch_size = 2
