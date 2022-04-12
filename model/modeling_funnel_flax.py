@@ -318,12 +318,11 @@ class FunnelRelMultiheadAttention(nn.Module):
         self.k_head = nn.Dense(n_head * d_head)
         self.v_head = nn.Dense(n_head * d_head)
 
-        # TODO find Jax/Flax equivalent
-        self.r_w_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
-        self.r_r_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
-        self.r_kernel =  nn.Parameter(jnp.zeros([d_model, n_head, d_head]))
-        self.r_s_bias =  nn.Parameter(jnp.zeros([n_head,  d_head]))
-        self.seg_embed = nn.Parameter(jnp.zeros([2,       n_head, d_head]))
+        self.r_w_bias =  self.param('r_w_bias',  nn.initializers.zeros, [n_head,  d_head])
+        self.r_r_bias =  self.param('r_r_bias',  nn.initializers.zeros, [n_head,  d_head])
+        self.r_kernel =  self.param('r_kernel',  nn.initializers.zeros, [d_model, n_head, d_head])
+        self.r_s_bias =  self.param('r_s_bias',  nn.initializers.zeros, [n_head,  d_head])
+        self.seg_embed = self.param('seg_embed', nn.initializers.zeros, [2,       n_head, d_head])
 
         self.post_proj = nn.Dense(d_model)
         self.layer_norm = nn.LayerNorm(d_model, eps=self.config.layer_norm_eps)
