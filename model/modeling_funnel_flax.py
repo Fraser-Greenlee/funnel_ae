@@ -209,9 +209,9 @@ class FunnelAttentionStructure(nn.Module):
         axis_slice = (
             slice(None, -1, 2) if self.config.separate_cls and self.config.truncate_seq else slice(None, None, 2)
         )
-        enc_slice = [slice(None)] * axis + [axis_slice]
+        enc_slice = tuple([slice(None)] * axis + [axis_slice])
         if self.config.separate_cls:
-            cls_slice = [slice(None)] * axis + [slice(None, 1)]
+            cls_slice = tuple([slice(None)] * axis + [slice(None, 1)])
             tensor = jnp.concatenate([tensor[cls_slice], tensor], axis=axis)
         return tensor[enc_slice]
 
@@ -235,15 +235,16 @@ class FunnelAttentionStructure(nn.Module):
             tensor = tensor[:, None, :, None]
         elif ndim == 3:
             tensor = tensor[:, None, :, :]
+
         # Stride is applied on the second-to-last dimension.
-        stride = (stride, 1)
+        stride = tuple([1 for _ in range(len(tensor.shape)-2)] + [stride])
 
         if mode == "mean":
-            tensor = nn.functional.avg_pool2d(tensor, stride, stride=stride, ceil_mode=True)
+            tensor = nn.avg_pool(tensor, stride, strides=stride)
         elif mode == "max":
-            tensor = nn.functional.max_pool2d(tensor, stride, stride=stride, ceil_mode=True)
+            tensor = nn.max_pool(tensor, stride, strides=stride)
         elif mode == "min":
-            tensor = -nn.functional.max_pool2d(-tensor, stride, stride=stride, ceil_mode=True)
+            tensor = -nn.max_pool(-tensor, stride, strides=stride)
         else:
             raise NotImplementedError("The supported modes are 'mean', 'max' and 'min'.")
 
