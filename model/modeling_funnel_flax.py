@@ -3,7 +3,9 @@ from typing import Optional, Tuple, Union, List
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from flax.core.frozen_dict import FrozenDict
 
+from transformers import FlaxPreTrainedModel
 from transformers.models.funnel.configuration_funnel import FunnelConfig
 from transformers.modeling_flax_utils import ACT2FN
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput
@@ -14,13 +16,17 @@ class FunnelEmbeddings(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        # TODO account for missing `padding_idx`
+        std = 1.0 if self.config.initializer_std is None else self.config.initializer_std
         self.word_embeddings = nn.Embed(
             self.config.vocab_size,
             self.config.hidden_size,
-            embedding_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            embedding_init=jax.nn.initializers.normal(stddev=std),
             dtype=self.dtype
         )
+        # set padding embedding to 0
+        # pytorch: module.word_embeddings.weight.data[module.word_embeddings.padding_idx].zero_()
+        breakpoint()
+        self.word_embeddings.embedding[self.config.pad_token_id] = 0
         self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
         self.dropout = nn.Dropout(self.config.hidden_dropout)
 
@@ -306,6 +312,12 @@ def _relative_shift_gather(positional_attn: jnp.ndarray, context_len: int, shift
     return positional_attn
 
 
+def dense_std(config, d_in_plus_out):
+    if config.initializer_std is None:
+        return jnp.sqrt(1.0 / float(d_in_plus_out))
+    return config.initializer_std
+
+
 class FunnelRelMultiheadAttention(nn.Module):
     config: FunnelConfig
     block_index: int
@@ -317,17 +329,20 @@ class FunnelRelMultiheadAttention(nn.Module):
         self.hidden_dropout = nn.Dropout(self.config.hidden_dropout)
         self.attention_dropout = nn.Dropout(self.config.attention_dropout)
 
-        self.q_head = nn.Dense(n_head * d_head, use_bias=False, dtype=self.dtype)
-        self.k_head = nn.Dense(n_head * d_head, dtype=self.dtype)
-        self.v_head = nn.Dense(n_head * d_head, dtype=self.dtype)
+        std = dense_std(self.config, d_model + n_head * d_head)
 
-        self.r_w_bias =  self.param('r_w_bias',  nn.initializers.zeros, [n_head,  d_head])
-        self.r_r_bias =  self.param('r_r_bias',  nn.initializers.zeros, [n_head,  d_head])
-        self.r_kernel =  self.param('r_kernel',  nn.initializers.zeros, [d_model, n_head, d_head])
-        self.r_s_bias =  self.param('r_s_bias',  nn.initializers.zeros, [n_head,  d_head])
-        self.seg_embed = self.param('seg_embed', nn.initializers.zeros, [2,       n_head, d_head])
+        self.q_head = nn.Dense(n_head * d_head, kernel_init=jax.nn.initializers.normal(std), use_bias=False, dtype=self.dtype)
+        self.k_head = nn.Dense(n_head * d_head, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
+        self.v_head = nn.Dense(n_head * d_head, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
 
-        self.post_proj = nn.Dense(d_model, dtype=self.dtype)
+        # jax.nn.initializers.uniform
+        self.r_w_bias =  self.param('r_w_bias',  jax.nn.initializers.uniform(self.config.initializer_range), [n_head,  d_head])
+        self.r_r_bias =  self.param('r_r_bias',  jax.nn.initializers.uniform(self.config.initializer_range), [n_head,  d_head])
+        self.r_kernel =  self.param('r_kernel',  jax.nn.initializers.uniform(self.config.initializer_range), [d_model, n_head, d_head])
+        self.r_s_bias =  self.param('r_s_bias',  jax.nn.initializers.uniform(self.config.initializer_range), [n_head,  d_head])
+        self.seg_embed = self.param('seg_embed', jax.nn.initializers.uniform(self.config.initializer_range), [2,       n_head, d_head])
+
+        self.post_proj = nn.Dense(d_model, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
         self.layer_norm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
         self.scale = 1.0 / (d_head**0.5)
 
@@ -442,7 +457,7 @@ class FunnelRelMultiheadAttention(nn.Module):
         # attention output, shape batch_size x seq_len x n_head x d_head
         attn_vec = jnp.einsum("bnij,bjnd->bind", attn_prob, v_head)
 
-        # Shape shape batch_size x seq_len x d_model
+        # Shape batch_size x seq_len x d_model
         attn_out = self.post_proj(attn_vec.reshape(batch_size, seq_len, n_head * d_head))
         attn_out = self.hidden_dropout(attn_out, deterministic=deterministic)
 
@@ -455,10 +470,11 @@ class FunnelPositionwiseFFN(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.linear_1 = nn.Dense(self.config.d_inner, dtype=self.dtype)
+        std = dense_std(self.config, self.config.d_model + self.config.d_inner)
+        self.linear_1 = nn.Dense(self.config.d_inner, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
         self.activation_function = ACT2FN[self.config.hidden_act]
         self.activation_dropout = nn.Dropout(self.config.activation_dropout)
-        self.linear_2 = nn.Dense(self.config.d_model, dtype=self.dtype)
+        self.linear_2 = nn.Dense(self.config.d_model, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
         self.dropout = nn.Dropout(self.config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
 
@@ -586,3 +602,38 @@ def upsample(
     else:
         output = output[:, :target_len]
     return output
+
+
+class FlaxFunnelPreTrainedModel(FlaxPreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = FunnelConfig
+    base_model_prefix = "funnel"
+    module_class: nn.Module = None
+
+    def __init__(
+        self,
+        config: FunnelConfig,
+        input_shape: Tuple[int] = (1, 1),
+        seed: int = 0,
+        dtype: jnp.dtype = jnp.float32,
+        **kwargs
+    ):
+        module = self.module_class(config=config, dtype=dtype, **kwargs)
+        super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype)
+
+    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple) -> FrozenDict:
+        # init input tensors
+        input_ids = jnp.zeros(input_shape, dtype="i4")
+        attention_mask = jnp.ones_like(input_ids)
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+
+        return self.module.init(
+            rngs,
+            input_ids,
+            attention_mask,
+        )["params"]
