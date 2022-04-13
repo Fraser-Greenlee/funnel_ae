@@ -307,6 +307,7 @@ def _relative_shift_gather(positional_attn: jnp.ndarray, context_len: int, shift
 class FunnelRelMultiheadAttention(nn.Module):
     config: FunnelConfig
     block_index: int
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         d_model, n_head, d_head = self.config.d_model, self.config.n_head, self.config.d_head
@@ -314,9 +315,9 @@ class FunnelRelMultiheadAttention(nn.Module):
         self.hidden_dropout = nn.Dropout(self.config.hidden_dropout)
         self.attention_dropout = nn.Dropout(self.config.attention_dropout)
 
-        self.q_head = nn.Dense(n_head * d_head, bias=False)
-        self.k_head = nn.Dense(n_head * d_head)
-        self.v_head = nn.Dense(n_head * d_head)
+        self.q_head = nn.Dense(n_head * d_head, use_bias=False, dtype=self.dtype)
+        self.k_head = nn.Dense(n_head * d_head, dtype=self.dtype)
+        self.v_head = nn.Dense(n_head * d_head, dtype=self.dtype)
 
         self.r_w_bias =  self.param('r_w_bias',  nn.initializers.zeros, [n_head,  d_head])
         self.r_r_bias =  self.param('r_r_bias',  nn.initializers.zeros, [n_head,  d_head])
@@ -324,8 +325,8 @@ class FunnelRelMultiheadAttention(nn.Module):
         self.r_s_bias =  self.param('r_s_bias',  nn.initializers.zeros, [n_head,  d_head])
         self.seg_embed = self.param('seg_embed', nn.initializers.zeros, [2,       n_head, d_head])
 
-        self.post_proj = nn.Dense(d_model)
-        self.layer_norm = nn.LayerNorm(d_model, eps=self.config.layer_norm_eps)
+        self.post_proj = nn.Dense(d_model, dtype=self.dtype)
+        self.layer_norm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
         self.scale = 1.0 / (d_head**0.5)
 
     def relative_positional_attention(self, position_embeds, q_head, context_len, cls_mask=None):
@@ -382,12 +383,12 @@ class FunnelRelMultiheadAttention(nn.Module):
         # Shape batch_size x n_head x seq_len x 2
         token_type_bias = jnp.einsum("bind,snd->bnis", q_head + r_s_bias, self.seg_embed)
         # Shape batch_size x n_head x seq_len x context_len
-        token_type_mat = token_type_mat[:, None].expand([batch_size, q_head.shape[2], seq_len, context_len])
+        token_type_mat = jnp.broadcast_to(token_type_mat[:, None], (batch_size, q_head.shape[2], seq_len, context_len))
         # Shapes batch_size x n_head x seq_len
-        diff_token_type, same_token_type = jnp.split(token_type_bias, 1, axis=-1)
+        diff_token_type, same_token_type = jnp.split(token_type_bias, 2, axis=-1)
         # Shape batch_size x n_head x seq_len x context_len
         token_type_attn = jnp.where(
-            token_type_mat, same_token_type.expand(token_type_mat.shape), diff_token_type.expand(token_type_mat.shape)
+            token_type_mat, jnp.broadcast_to(same_token_type, token_type_mat.shape), jnp.broadcast_to(diff_token_type, token_type_mat.shape)
         )
 
         if cls_mask is not None:
@@ -412,10 +413,10 @@ class FunnelRelMultiheadAttention(nn.Module):
         n_head, d_head = self.config.n_head, self.config.d_head
 
         # Shape batch_size x seq_len x n_head x d_head
-        q_head = self.q_head(query).view(batch_size, seq_len, n_head, d_head)
+        q_head = self.q_head(query).reshape(batch_size, seq_len, n_head, d_head)
         # Shapes batch_size x context_len x n_head x d_head
-        k_head = self.k_head(key).view(batch_size, context_len, n_head, d_head)
-        v_head = self.v_head(value).view(batch_size, context_len, n_head, d_head)
+        k_head = self.k_head(key).reshape(batch_size, context_len, n_head, d_head)
+        v_head = self.v_head(value).reshape(batch_size, context_len, n_head, d_head)
 
         q_head = q_head * self.scale
         # Shape n_head x d_head
@@ -427,13 +428,11 @@ class FunnelRelMultiheadAttention(nn.Module):
 
         # merge attention scores
         attn_score = content_score + positional_attn + token_type_attn
+        # TODO should I include old `precision safe in case of mixed precision training`?
 
-        # precision safe in case of mixed precision training
-        dtype = attn_score.dtype
-        attn_score = attn_score.float()
         # perform masking
         if attention_mask is not None:
-            attn_score = attn_score - float("inf") * (1 - attention_mask[:, None, None].float())
+            attn_score = attn_score - float("inf") * (1 - attention_mask[:, None, None].astype(self.dtype))
         # attention probability
         attn_prob = jax.nn.softmax(attn_score, axis=-1)
         attn_prob = self.attention_dropout(attn_prob, deterministic=deterministic)
