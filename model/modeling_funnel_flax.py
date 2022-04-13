@@ -634,3 +634,21 @@ class FlaxFunnelPreTrainedModel(FlaxPreTrainedModel):
             input_ids,
             attention_mask,
         )["params"]
+
+
+class FunnelClassificationHead(nn.Module):
+    dtype: jnp.dtype = jnp.float32
+
+    def __init__(self, config: FunnelConfig, n_labels: int) -> None:
+        super().__init__()
+        std = dense_std(config, config.d_model*2)
+        self.linear_hidden = nn.Dense(config.d_model, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
+        self.dropout = nn.Dropout(config.hidden_dropout)
+        std = dense_std(config, config.d_model + n_labels)
+        self.linear_out = nn.Dense(n_labels, kernel_init=jax.nn.initializers.normal(std), dtype=self.dtype)
+
+    def forward(self, hidden: jnp.ndarray) -> jnp.ndarray:
+        hidden = self.linear_hidden(hidden)
+        hidden = jnp.tanh(hidden)
+        hidden = self.dropout(hidden)
+        return self.linear_out(hidden)
