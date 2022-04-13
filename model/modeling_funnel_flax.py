@@ -240,11 +240,11 @@ class FunnelAttentionStructure(nn.Module):
         stride = tuple([1 for _ in range(len(tensor.shape)-2)] + [stride])
 
         if mode == "mean":
-            tensor = nn.avg_pool(tensor, stride, strides=stride)
+            tensor = nn.avg_pool(tensor, stride, strides=stride, padding='SAME')
         elif mode == "max":
-            tensor = nn.max_pool(tensor, stride, strides=stride)
+            tensor = nn.max_pool(tensor, stride, strides=stride, padding='SAME')
         elif mode == "min":
-            tensor = -nn.max_pool(-tensor, stride, strides=stride)
+            tensor = -nn.max_pool(-tensor, stride, strides=stride, padding='SAME')
         else:
             raise NotImplementedError("The supported modes are 'mean', 'max' and 'min'.")
 
@@ -432,7 +432,7 @@ class FunnelRelMultiheadAttention(nn.Module):
 
         # perform masking
         if attention_mask is not None:
-            attn_score = attn_score - float("inf") * (1 - attention_mask[:, None, None].astype(self.dtype))
+            attn_score = attn_score - 1e6 * (1 - attention_mask[:, None, None].astype(self.dtype))
         # attention probability
         attn_prob = jax.nn.softmax(attn_score, axis=-1)
         attn_prob = self.attention_dropout(attn_prob, deterministic=deterministic)
