@@ -3,10 +3,9 @@ from typing import Optional, Tuple, Union, List
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from matplotlib.pyplot import axis
-from numpy import dtype
 
 from transformers.models.funnel.configuration_funnel import FunnelConfig
+from transformers.modeling_flax_utils import ACT2FN
 
 
 class FunnelEmbeddings(nn.Module):
@@ -446,3 +445,24 @@ class FunnelRelMultiheadAttention(nn.Module):
 
         output = self.layer_norm(query + attn_out)
         return (output, attn_prob) if output_attentions else (output,)
+
+
+class FunnelPositionwiseFFN(nn.Module):
+    config: FunnelConfig
+
+    def setup(self):
+        self.linear_1 = nn.Dense(self.config.d_inner)
+        self.activation_function = ACT2FN[self.config.hidden_act]
+        self.activation_dropout = nn.Dropout(self.config.activation_dropout)
+        self.linear_2 = nn.Dense(self.config.d_model)
+        self.dropout = nn.Dropout(self.config.hidden_dropout)
+        self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
+
+    def __call__(self, hidden: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
+        h = self.linear_1(hidden)
+        h = self.activation_function(h)
+        h = self.activation_dropout(h, deterministic=deterministic)
+        h = self.linear_2(h)
+        h = self.dropout(h, deterministic=deterministic)
+        return self.layer_norm(hidden + h)
+

@@ -9,6 +9,7 @@ from model.modeling_funnel_flax import (
     FunnelEmbeddings,
     FunnelAttentionStructure,
     FunnelRelMultiheadAttention,
+    FunnelPositionwiseFFN,
 )
 
 
@@ -228,3 +229,21 @@ class TestFunnelRelMultiheadAttention(unittest.TestCase):
         self.assertEqual(attn_prob.shape, (2, 4, 4, 4))
         self.assertNotEqual(attn_prob[0,:,:,-1].tolist(), [[0.0, 0.0, 0.0, 0.0] for _ in range(4)])
         self.assertEqual(attn_prob[1,:,:,-1].tolist(), [[0.0, 0.0, 0.0, 0.0] for _ in range(4)])
+
+
+class TestFunnelPositionwiseFFN(unittest.TestCase):
+    def test_eval(self):
+        config = FunnelConfig()
+        ffn = FunnelPositionwiseFFN(config)
+        embeds  = jax.random.normal(rng, (2, 4, config.d_model))
+        variables = ffn.init(rng, embeds)
+        hidden = ffn.apply(variables, embeds)
+        self.assertEqual(hidden.shape, (2, 4, config.d_model))
+
+    def test_train(self):
+        config = FunnelConfig()
+        ffn = FunnelPositionwiseFFN(config)
+        embeds  = jax.random.normal(rng, (2, 4, config.d_model))
+        variables = ffn.init(rng, embeds)
+        hidden = ffn.apply(variables, embeds, deterministic=False, rngs={'dropout': rng})
+        self.assertEqual(hidden.shape, (2, 4, config.d_model))
