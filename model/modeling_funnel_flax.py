@@ -23,10 +23,7 @@ class FunnelEmbeddings(nn.Module):
             embedding_init=jax.nn.initializers.normal(stddev=std),
             dtype=self.dtype
         )
-        # set padding embedding to 0
-        # pytorch: module.word_embeddings.weight.data[module.word_embeddings.padding_idx].zero_()
-        breakpoint()
-        self.word_embeddings.embedding[self.config.pad_token_id] = 0
+        # TODO unable to make padding token embedding 0, could multiply by zero after each inference?
         self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
         self.dropout = nn.Dropout(self.config.hidden_dropout)
 
