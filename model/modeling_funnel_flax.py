@@ -6,10 +6,12 @@ import flax.linen as nn
 
 from transformers.models.funnel.configuration_funnel import FunnelConfig
 from transformers.modeling_flax_utils import ACT2FN
+from transformers.modeling_flax_outputs import FlaxBaseModelOutput
 
 
 class FunnelEmbeddings(nn.Module):
     config: FunnelConfig
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         # TODO account for missing `padding_idx`
@@ -17,6 +19,7 @@ class FunnelEmbeddings(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             embedding_init=jax.nn.initializers.normal(stddev=self.config.initializer_range),
+            dtype=self.dtype
         )
         self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
         self.dropout = nn.Dropout(self.config.hidden_dropout)
@@ -449,12 +452,13 @@ class FunnelRelMultiheadAttention(nn.Module):
 
 class FunnelPositionwiseFFN(nn.Module):
     config: FunnelConfig
+    dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        self.linear_1 = nn.Dense(self.config.d_inner)
+        self.linear_1 = nn.Dense(self.config.d_inner, dtype=self.dtype)
         self.activation_function = ACT2FN[self.config.hidden_act]
         self.activation_dropout = nn.Dropout(self.config.activation_dropout)
-        self.linear_2 = nn.Dense(self.config.d_model)
+        self.linear_2 = nn.Dense(self.config.d_model, dtype=self.dtype)
         self.dropout = nn.Dropout(self.config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(self.config.layer_norm_eps)
 
@@ -466,3 +470,119 @@ class FunnelPositionwiseFFN(nn.Module):
         h = self.dropout(h, deterministic=deterministic)
         return self.layer_norm(hidden + h)
 
+
+class FunnelLayer(nn.Module):
+    config: FunnelConfig
+    block_index: int
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.attention = FunnelRelMultiheadAttention(self.config, self.block_index, dtype=self.dtype)
+        self.ffn = FunnelPositionwiseFFN(self.config, dtype=self.dtype)
+
+    def __call__(
+        self,
+        query:  jnp.ndarray,
+        key:    jnp.ndarray,
+        value:  jnp.ndarray,
+        attention_inputs,
+        output_attentions: bool = False,
+        deterministic: bool = True,
+    ) -> Tuple:
+        attn = self.attention(query, key, value, attention_inputs, output_attentions=output_attentions, deterministic=deterministic)
+        output = self.ffn(attn[0], deterministic=deterministic)
+        return (output, attn[1]) if output_attentions else (output,)
+
+
+class FunnelEncoder(nn.Module):
+    config: FunnelConfig
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.attention_structure = FunnelAttentionStructure(self.config)
+        # TODO this may be better done as many `FunnelBlock`s
+        self.blocks = [
+            [
+                [
+                    FunnelLayer(self.config, block_index)
+                    for _ in range(block_size)
+                ]
+                for block_index, block_size in enumerate(self.config.block_sizes)
+            ]
+        ]
+
+    def __call__(
+        self,
+        inputs_embeds: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
+        token_type_ids: Optional[jnp.ndarray] = None,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+        deterministic: bool = True,
+    ):
+        # The pooling is not implemented on long tensors, so we convert this mask.
+        attention_mask = attention_mask.type_as(inputs_embeds)
+        attention_inputs = self.attention_structure.init_attention_inputs(
+            inputs_embeds,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
+        hidden = inputs_embeds
+
+        all_hidden_states = (inputs_embeds,) if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+
+        for block_index, block in enumerate(self.blocks):
+            pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
+            pooling_flag = pooling_flag and block_index > 0
+            if pooling_flag:
+                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
+                    hidden, attention_inputs
+                )
+            for (layer_index, layer) in enumerate(block):
+                for repeat_index in range(self.config.block_repeats[block_index]):
+                    do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
+                    if do_pooling:
+                        query = pooled_hidden
+                        key = value = hidden if self.config.pool_q_only else pooled_hidden
+                    else:
+                        query = key = value = hidden
+                    layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions, deterministic=deterministic)
+                    hidden = layer_output[0]
+                    if do_pooling:
+                        attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
+
+                    if output_attentions:
+                        all_attentions = all_attentions + layer_output[1:]
+                    if output_hidden_states:
+                        all_hidden_states = all_hidden_states + (hidden,)
+
+        if not return_dict:
+            return tuple(v for v in [hidden, all_hidden_states, all_attentions] if v is not None)
+        return FlaxBaseModelOutput(last_hidden_state=hidden, hidden_states=all_hidden_states, attentions=all_attentions)
+
+
+# unused for now
+def upsample(
+    x: jnp.ndarray, stride: int, target_len: int, separate_cls: bool = True, truncate_seq: bool = False
+) -> jnp.ndarray:
+    """
+    Upsample tensor `x` to match `target_len` by repeating the tokens `stride` time on the sequence length dimension.
+    """
+    if stride == 1:
+        return x
+    if separate_cls:
+        cls = x[:, :1]
+        x = x[:, 1:]
+    # TODO does this match old?
+    output = jnp.repeat(x, repeats=stride, axis=1)
+    if separate_cls:
+        if truncate_seq:
+            output = nn.functional.pad(output, (0, 0, 0, stride - 1, 0, 0))
+        output = output[:, : target_len - 1]
+        # TODO does this match old?
+        output = jnp.concatenate([cls, output], dim=1)
+    else:
+        output = output[:, :target_len]
+    return output
