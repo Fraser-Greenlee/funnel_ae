@@ -198,7 +198,6 @@ class TestFunnelRelMultiheadAttention(unittest.TestCase):
         self.assertNotEqual(attn_prob[0,:,:,-2].tolist(), [[0.0, 0.0, 0.0, 0.0] for _ in range(4)])
 
     def test_not_pool_q_only_block_1(self):
-        # Failing
         batch_size, seq_len = 2, 7
         config = FunnelConfig(pool_q_only=False, d_model=32, n_head=4, d_head=8)
         inputs_embeds  = jax.random.normal(rng, (batch_size, seq_len, config.d_model))
@@ -215,8 +214,8 @@ class TestFunnelRelMultiheadAttention(unittest.TestCase):
             variables, inputs_embeds, attention_inputs, method=attention_structure.pre_attention_pooling
         )
         query = jax.random.normal(rng, pooled_hidden.shape)
-        key =   jax.random.normal(rng, inputs_embeds.shape)
-        value = jax.random.normal(rng, inputs_embeds.shape)
+        key =   jax.random.normal(rng, pooled_hidden.shape)
+        value = jax.random.normal(rng, pooled_hidden.shape)
         #
         attention = FunnelRelMultiheadAttention(config, 1)
         variables = attention.init(
@@ -225,5 +224,7 @@ class TestFunnelRelMultiheadAttention(unittest.TestCase):
         output, attn_prob = attention.apply(
             variables, query, key, value, new_attention_inputs, output_attentions=True
         )
-        breakpoint()
-        z = 1
+        self.assertEqual(output.shape, (2, 4, 32))
+        self.assertEqual(attn_prob.shape, (2, 4, 4, 4))
+        self.assertNotEqual(attn_prob[0,:,:,-1].tolist(), [[0.0, 0.0, 0.0, 0.0] for _ in range(4)])
+        self.assertEqual(attn_prob[1,:,:,-1].tolist(), [[0.0, 0.0, 0.0, 0.0] for _ in range(4)])
