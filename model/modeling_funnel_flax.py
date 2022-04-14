@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax.core.frozen_dict import FrozenDict
+from numpy import dtype
 
 from transformers import FlaxPreTrainedModel
 from transformers.models.funnel.configuration_funnel import FunnelConfig
@@ -507,7 +508,7 @@ class FunnelLayer(nn.Module):
         return (output, attn[1]) if output_attentions else (output,)
 
 
-class FunnelEncoder(nn.Module):
+class FlaxFunnelEncoder(nn.Module):
     config: FunnelConfig
     dtype: jnp.dtype = jnp.float32
 
@@ -517,7 +518,7 @@ class FunnelEncoder(nn.Module):
         self.blocks = [
             [
                 [
-                    FunnelLayer(self.config, block_index)
+                    FunnelLayer(self.config, block_index, dtype=dtype)
                     for _ in range(block_size)
                 ]
                 for block_index, block_size in enumerate(self.config.block_sizes)
