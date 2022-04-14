@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union, List
+from typing import Any, Dict, Optional, Tuple, Union, List
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,8 @@ class FlaxFunnelAeOutput(ModelOutput):
             Sequence of hidden-states at the output of the last layer of the model.
         latent_codes (`tuple(jnp.ndarray)` of shape `(batch_size, sequence_length / 2^nth_block, latent_size)`):
             Tuple of latents taken after each block.
+        attention_inputs (`dict(any)`):
+            Dict of attention inputs.
         hidden_states (`tuple(jnp.ndarray)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
             Tuple of `jnp.ndarray` (one for the output of the embeddings + one for the output of each layer) of shape
             `(batch_size, sequence_length, hidden_size)`.
@@ -38,6 +40,7 @@ class FlaxFunnelAeOutput(ModelOutput):
 
     last_hidden_state: jnp.ndarray = None
     latent_codes: Tuple[jnp.ndarray] = None
+    attention_inputs: Dict[Any] = None
     hidden_states: Optional[Tuple[jnp.ndarray]] = None
     attentions: Optional[Tuple[jnp.ndarray]] = None
 
@@ -131,6 +134,7 @@ class FlaxFunnelBlock(nn.Module):
         all_hidden_states = (inputs_embeds,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
         latent_codes = ()
+        all_attention_inputs = {}
 
         for block_index, block in enumerate(self.blocks):
             pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
@@ -149,6 +153,7 @@ class FlaxFunnelBlock(nn.Module):
                         query = key = value = hidden
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions, deterministic=deterministic)
                     hidden = layer_output[0]
+                    all_attention_inputs[block_index, layer_index, repeat_index] = attention_inputs
                     if do_pooling:
                         attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
 
@@ -161,56 +166,43 @@ class FlaxFunnelBlock(nn.Module):
             latent_codes = latent_codes + (latent,)
 
         if not return_dict:
-            return tuple(v for v in [hidden, latent_codes, all_hidden_states, all_attentions] if v is not None)
-        return FlaxFunnelAeOutput(last_hidden_state=hidden, latent_codes=latent_codes, hidden_states=all_hidden_states, attentions=all_attentions)
+            return tuple(v for v in [hidden, latent_codes, all_attention_inputs, all_hidden_states, all_attentions] if v is not None)
+        return FlaxFunnelAeOutput(last_hidden_state=hidden, latent_codes=latent_codes, attention_inputs=all_attention_inputs, hidden_states=all_hidden_states, attentions=all_attentions)
 
     def decode(
         self,
         hidden: jnp.ndarray,
         encoder_latent_codes: Tuple[jnp.ndarray],
-        attention_mask: Optional[jnp.ndarray] = None,
-        token_type_ids: Optional[jnp.ndarray] = None,
+        encoder_attention_inputs: Dict[Any],
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
         deterministic: bool = True,
     ):
         # TODO:
-        # - Take encoder latents
-        # - Combine with decoder latents to make new hidden states
-        # - 
-        #
-        # The pooling is not implemented on long tensors, so we convert this mask.
-        attention_mask = attention_mask.type_as(hidden)
-        attention_inputs = self.attention_structure.init_attention_inputs(
-            hidden,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
+        # - Use attention upsampling double the hidden size
 
         all_hidden_states = (hidden,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
         latent_codes = ()
 
-        for block_index, block in enumerate(self.blocks):
-            pooling_flag = hidden.size(1) > (2 if self.config.separate_cls else 1)
-            pooling_flag = pooling_flag and block_index > 0
-            if pooling_flag:
-                pooled_hidden, attention_inputs = self.attention_structure.pre_attention_pooling(
-                    hidden, attention_inputs
-                )
-            for (layer_index, layer) in enumerate(block):
-                for repeat_index in range(self.config.block_repeats[block_index]):
-                    do_pooling = (repeat_index == 0) and (layer_index == 0) and pooling_flag
-                    if do_pooling:
-                        query = pooled_hidden
-                        key = value = hidden if self.config.pool_q_only else pooled_hidden
+        for block_index, block in list(enumerate(self.blocks))[::-1]:
+            upsampling_flag = hidden.shape[1] < encoder_latent_codes[0].shape[1]
+            upsampling_flag = upsampling_flag and block_index > 0
+            if upsampling_flag:
+                target_size = encoder_latent_codes[block_index-1].shape[1]
+                upsampled_hidden = self.upsample_hidden(hidden, target_size, block_index)
+            for (layer_index, layer) in list(enumerate(block))[::-1]:
+                for repeat_index in range(self.config.block_repeats[block_index])[::-1]:
+                    do_upsampling = (repeat_index == 0) and (layer_index == 0) and upsampling_flag
+                    if do_upsampling:
+                        query = upsampled_hidden
+                        key = value = hidden if self.config.upsample_q_only else upsampled_hidden
                     else:
                         query = key = value = hidden
+                    attention_inputs = encoder_attention_inputs[block_index, layer_index, repeat_index]
                     layer_output = layer(query, key, value, attention_inputs, output_attentions=output_attentions, deterministic=deterministic)
                     hidden = layer_output[0]
-                    if do_pooling:
-                        attention_inputs = self.attention_structure.post_attention_pooling(attention_inputs)
 
                     if output_attentions:
                         all_attentions = all_attentions + layer_output[1:]
@@ -272,15 +264,15 @@ class FlaxFunnelAeModel(FlaxFunnelPreTrainedModel):
             return_dict=return_dict,
             deterministic=deterministic
         )
-        encoder_outputs = self.decoder.decode(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
+        decoder_outputs = self.decoder.decode(
+            encoder_outputs[0],
+            encoder_outputs[1],
+            encoder_outputs[2],
             output_attentions=output_attentions,
             output_hidden_states=True,
             return_dict=return_dict,
             deterministic=deterministic
         )
+        return decoder_outputs + encoder_outputs
+
+# TODO: FlaxFunnelAeForMLM
